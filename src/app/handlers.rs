@@ -378,16 +378,13 @@ pub async fn handle_champ_select(
     event: Value,
 ) {
     if event_data(&event).is_none() {
+        // eventType = Delete：选人结束，重置状态
+        reset_champ_select_state(&state, &overlay_tx).await;
         return;
     }
 
-    let session = match api.get_champ_select_session().await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("获取 champ-select session 失败: {e}");
-            return;
-        }
-    };
+    // WS payload 的 data 字段即为完整 session，无需额外 HTTP GET
+    let session = event_data(&event).unwrap().clone();
 
     // 非大乱斗模式（benchEnabled = false），重置状态
     if !session
