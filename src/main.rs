@@ -48,10 +48,63 @@ const RECONNECT_DELAY_SECS: u64 = 5;
 /// `--show-overlay`：强制 overlay 始终显示（仅 debug 构建有效）。
 pub static DEBUG_SHOW_OVERLAY: AtomicBool = AtomicBool::new(false);
 
+// ── 单实例守卫 ───────────────────────────────────────────────────
+
+/// 通过 Windows 命名互斥量确保只有一个实例运行。
+///
+/// 返回互斥量句柄（必须保持存活至进程退出，否则互斥量会被释放）。
+/// 若已有实例在运行，弹出提示后退出进程。
+fn ensure_single_instance() -> windows::Win32::Foundation::HANDLE {
+    use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::PCWSTR;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ffi::OsStr;
+
+    let name: Vec<u16> = OsStr::new("Global\\LOL_LCU_SingleInstance")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let handle = unsafe {
+        CreateMutexW(None, true, PCWSTR(name.as_ptr()))
+            .expect("CreateMutexW 失败")
+    };
+
+    // ERROR_ALREADY_EXISTS：互斥量已存在，说明已有实例在运行
+    if unsafe { windows::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS {
+        // Release 模式无控制台，弹一个 MessageBox 提示用户
+        #[cfg(not(debug_assertions))]
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+            use std::ffi::OsStr;
+            let text: Vec<u16> = OsStr::new("LOL_LCU 已在运行中，不允许重复启动。")
+                .encode_wide().chain(std::iter::once(0)).collect();
+            let caption: Vec<u16> = OsStr::new("LOL_LCU")
+                .encode_wide().chain(std::iter::once(0)).collect();
+            MessageBoxW(
+                windows::Win32::Foundation::HWND::default(),
+                PCWSTR(text.as_ptr()),
+                PCWSTR(caption.as_ptr()),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
+        #[cfg(debug_assertions)]
+        eprintln!("[LOL_LCU] 已有实例在运行，退出。");
+
+        std::process::exit(1);
+    }
+
+    handle
+}
+
 // ── 入口 ─────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
+    // 单实例检查（句柄必须存活至进程退出）
+    let _single_instance_mutex = ensure_single_instance();
+
     // Release 构建：尝试附加到父进程控制台（从终端启动时才有日志输出）
     #[cfg(not(debug_assertions))]
     try_attach_parent_console();
