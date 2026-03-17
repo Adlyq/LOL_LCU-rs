@@ -6,7 +6,7 @@
 // 从终端启动时 stderr 句柄仍由父进程继承，日志照常输出到终端。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //!
-//! 架构：
+//! 架构：      
 //! ```
 //! main
 //! ├── logging::init_logging()               初始化日志（控制台 + 文件）
@@ -52,6 +52,10 @@ pub static DEBUG_SHOW_OVERLAY: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() {
+    // Release 构建：尝试附加到父进程控制台（从终端启动时才有日志输出）
+    #[cfg(not(debug_assertions))]
+    try_attach_parent_console();
+
     // 解析启动参数（仅 debug 构建）
     #[cfg(debug_assertions)]
     {
@@ -304,6 +308,39 @@ async fn main_loop(
                     }
                 }
             }
+        }
+    }
+}
+// ── Release 控制台附加 ─────────────────────────────────────────────
+
+/// 尝试附加到父进程控制台（仅 release 构建有效）。
+///
+/// - 从终端（cmd/PowerShell）启动：`AttachConsole` 成功，重定向 stderr 到控制台，日志可见。
+/// - 双击启动：无父控制台，`AttachConsole` 失败，保持静默，不弹黑窗。
+#[cfg(not(debug_assertions))]
+fn try_attach_parent_console() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        AttachConsole, SetConsoleCP, SetConsoleOutputCP, SetStdHandle,
+        ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        // 附加到父进程控制台；失败则说明是双击启动，不需输出
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            return;
+        }
+        // 切换为 UTF-8 代码页，防止中文乱码
+        let _ = SetConsoleOutputCP(65001);
+        let _ = SetConsoleCP(65001);
+        // 打开控制台输出设备，将 Windows 标准句柄指向它
+        // （tracing-subscriber 首次调用 io::stderr() 时会懒初始化，此时已更新应能取到新句柄）
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+            let h = HANDLE(f.into_raw_handle().cast());
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+            // into_raw_handle 已转移所有权，句柄生命周期随进程。
         }
     }
 }
