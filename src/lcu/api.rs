@@ -197,6 +197,14 @@ impl LcuClient {
         Ok(())
     }
 
+    /// 退出结算界面，返回大厅。
+    ///
+    /// 调用 `POST /lol-lobby/v2/play-again`：适用于结算页面卡住无法手动退出的情况。
+    pub async fn play_again(&self) -> Result<(), LcuApiError> {
+        self.post_json("/lol-lobby/v2/play-again", None).await?;
+        Ok(())
+    }
+
     // ── 召唤师 ──────────────────────────────────────────────────────
 
     pub async fn get_current_summoner(&self) -> Result<Value, LcuApiError> {

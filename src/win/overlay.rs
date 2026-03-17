@@ -53,6 +53,8 @@ const TRAY_UID: u32 = 1;
 const IDM_QUIT: usize = 1001;
 /// 托盘菜单"热重载客户端"项的命令 ID
 const IDM_RELOAD_UX: usize = 1002;
+/// 托盘菜单"退出结算页面"项的命令 ID
+const IDM_PLAY_AGAIN: usize = 1003;
 
 // ── 指令类型 ─────────────────────────────────────────────────────
 
@@ -81,6 +83,8 @@ pub enum OverlayCmd {
 pub enum TrayAction {
     /// 热重载 LCU 客户端 UX（不断开排队 / 游戏连接）
     ReloadUx,
+    /// 退出结算界面，返回大厅
+    PlayAgain,
 }
 
 // ── Overlay 线程启动 ──────────────────────────────────────────────
@@ -493,6 +497,8 @@ unsafe extern "system" fn overlay_wnd_proc(
                 // 构建右键菜单
                 let hmenu = CreatePopupMenu();
                 if let Ok(hmenu) = hmenu {
+                    let play_again_text = to_wide("退出结算页面");
+                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_PLAY_AGAIN, windows::core::PCWSTR(play_again_text.as_ptr()));
                     let reload_text = to_wide("热重载客户端");
                     let _ = AppendMenuW(hmenu, MF_STRING, IDM_RELOAD_UX, windows::core::PCWSTR(reload_text.as_ptr()));
                     let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, windows::core::PCWSTR(std::ptr::null()));
@@ -517,7 +523,12 @@ unsafe extern "system" fn overlay_wnd_proc(
                     let _ = DestroyMenu(hmenu);
 
                     let cmd_id = cmd.0 as usize;
-                    if cmd_id == IDM_RELOAD_UX {
+                    if cmd_id == IDM_PLAY_AGAIN {
+                        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                        if !ptr.is_null() {
+                            let _ = (*ptr).tray_tx.try_send(TrayAction::PlayAgain);
+                        }
+                    } else if cmd_id == IDM_RELOAD_UX {
                         let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
                         if !ptr.is_null() {
                             let _ = (*ptr).tray_tx.try_send(TrayAction::ReloadUx);

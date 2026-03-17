@@ -382,6 +382,16 @@ async fn main_loop(
                             }
                         });
                     }
+                    Some(TrayAction::PlayAgain) => {
+                        info!("正在退出结算页面...");
+                        let api2 = api.clone();
+                        tokio::spawn(async move {
+                            match api2.play_again().await {
+                                Ok(()) => info!("退出结算页面成功"),
+                                Err(e) => warn!("退出结算页面失败: {e}"),
+                            }
+                        });
+                    }
                     None => {
                         warn!("tray_rx 通道已关闭");
                     }
