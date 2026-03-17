@@ -40,7 +40,7 @@ use app::state::new_shared_state;
 use lcu::api::LcuClient;
 use lcu::connection::{build_client, wait_for_credentials};
 use lcu::websocket::{spawn_ws_loop, LcuEvent};
-use win::overlay::{spawn_overlay_thread, OverlayCmd};
+use win::overlay::{spawn_overlay_thread, OverlayCmd, TrayAction};
 
 /// 重连等待时间（对应 Python `RECONNECT_DELAY_SECONDS`）
 const RECONNECT_DELAY_SECS: u64 = 5;
@@ -75,7 +75,7 @@ async fn main() {
     // 启动 overlay 线程（Win32 消息循环）
     // click_tx: overlay 线程 → tokio 的槽位点击事件
     let (click_tx, mut click_rx) = mpsc::channel::<usize>(32);
-    let overlay_tx = spawn_overlay_thread(click_tx);
+    let (overlay_tx, mut tray_rx) = spawn_overlay_thread(click_tx);
 
     // --show-overlay：线程刚启动，稍等窗口创建完成后立即 Show
     #[cfg(debug_assertions)]
@@ -87,7 +87,7 @@ async fn main() {
     let state = new_shared_state();
 
     // 主重连循环
-    run_with_reconnect(state.clone(), overlay_tx.clone(), &mut click_rx).await;
+    run_with_reconnect(state.clone(), overlay_tx.clone(), &mut click_rx, &mut tray_rx).await;
 
     // 退出前通知 overlay 线程退出
     let _ = overlay_tx.send(OverlayCmd::Quit).await;
@@ -100,11 +100,12 @@ async fn run_with_reconnect(
     state: app::state::SharedState,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     click_rx: &mut mpsc::Receiver<usize>,
+    tray_rx: &mut mpsc::Receiver<TrayAction>,
 ) {
     loop {
         info!("正在连接 LCU...");
 
-        match run_once(state.clone(), overlay_tx.clone(), click_rx).await {
+        match run_once(state.clone(), overlay_tx.clone(), click_rx, tray_rx).await {
             Ok(()) => {
                 info!("主循环正常结束");
             }
@@ -125,6 +126,9 @@ async fn run_with_reconnect(
         let _ = overlay_tx.send(OverlayCmd::Hide).await;
         let _ = overlay_tx.send(OverlayCmd::SetBenchIds(vec![])).await;
 
+        // 清空断线期间积压的托盘动作，避免重连后误触发
+        while tray_rx.try_recv().is_ok() {}
+
         info!("{RECONNECT_DELAY_SECS} 秒后尝试重连...");
         sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
     }
@@ -136,6 +140,7 @@ async fn run_once(
     state: app::state::SharedState,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     click_rx: &mut mpsc::Receiver<usize>,
+    tray_rx: &mut mpsc::Receiver<TrayAction>,
 ) -> anyhow::Result<()> {
     // 扫描进程列表，等待 LCU 进程出现（对应 willump 的初始化循环）
     let creds = wait_for_credentials().await;
@@ -182,6 +187,7 @@ async fn run_once(
         state,
         overlay_tx.clone(),
         click_rx,
+        tray_rx,
         &mut rx_gameflow,
         &mut rx_ready_check,
         &mut rx_honor,
@@ -202,6 +208,7 @@ async fn main_loop(
     state: app::state::SharedState,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     click_rx: &mut mpsc::Receiver<usize>,
+    tray_rx: &mut mpsc::Receiver<TrayAction>,
     rx_gameflow: &mut tokio::sync::broadcast::Receiver<LcuEvent>,
     rx_ready_check: &mut tokio::sync::broadcast::Receiver<LcuEvent>,
     rx_honor: &mut tokio::sync::broadcast::Receiver<LcuEvent>,
@@ -305,6 +312,25 @@ async fn main_loop(
                     }
                     None => {
                         warn!("click_rx 通道已关闭");
+                    }
+                }
+            }
+
+            // ── 托盘菜单动作 ─────────────────────────────
+            action = tray_rx.recv() => {
+                match action {
+                    Some(TrayAction::ReloadUx) => {
+                        info!("正在热重载 LCU 客户端...");
+                        let api2 = api.clone();
+                        tokio::spawn(async move {
+                            match api2.reload_ux().await {
+                                Ok(()) => info!("LCU 客户端热重载已触发"),
+                                Err(e) => warn!("热重载失败: {e}"),
+                            }
+                        });
+                    }
+                    None => {
+                        warn!("tray_rx 通道已关闭");
                     }
                 }
             }

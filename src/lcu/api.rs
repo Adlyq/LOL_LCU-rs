@@ -188,6 +188,15 @@ impl LcuClient {
         })
     }
 
+    /// 热重载 LCU 客户端界面（不会断开排队 / 游戏连接）。
+    ///
+    /// 调用 `POST /riotclient/kill-and-restart-ux`：RiotClient 终止并重启
+    /// LeagueClientUx 进程，仅重载 UI 层，不影响游戏状态。
+    pub async fn reload_ux(&self) -> Result<(), LcuApiError> {
+        self.post_json("/riotclient/kill-and-restart-ux", None).await?;
+        Ok(())
+    }
+
     // ── 召唤师 ──────────────────────────────────────────────────────
 
     pub async fn get_current_summoner(&self) -> Result<Value, LcuApiError> {

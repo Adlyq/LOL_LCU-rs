@@ -51,6 +51,8 @@ const WM_TRAY_ICON: u32 = WM_USER + 100;
 const TRAY_UID: u32 = 1;
 /// 托盘菜单"退出"项的命令 ID
 const IDM_QUIT: usize = 1001;
+/// 托盘菜单"热重载客户端"项的命令 ID
+const IDM_RELOAD_UX: usize = 1002;
 
 // ── 指令类型 ─────────────────────────────────────────────────────
 
@@ -74,6 +76,13 @@ pub enum OverlayCmd {
     Quit,
 }
 
+/// 托盘菜单动作（overlay 线程 → tokio 的单向事件）。
+#[derive(Debug, Clone)]
+pub enum TrayAction {
+    /// 热重载 LCU 客户端 UX（不断开排队 / 游戏连接）
+    ReloadUx,
+}
+
 // ── Overlay 线程启动 ──────────────────────────────────────────────
 
 /// 启动 Overlay 后台线程（Win32 消息循环），返回 tokio mpsc 发送端。
@@ -81,17 +90,21 @@ pub enum OverlayCmd {
 /// 点击回调通过 `click_tx`（tokio::sync::mpsc）发送到 tokio 侧。
 pub fn spawn_overlay_thread(
     click_tx: tokio::sync::mpsc::Sender<usize>,
-) -> tokio::sync::mpsc::Sender<OverlayCmd> {
+) -> (
+    tokio::sync::mpsc::Sender<OverlayCmd>,
+    tokio::sync::mpsc::Receiver<TrayAction>,
+) {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<OverlayCmd>(256);
+    let (tray_tx, tray_rx) = tokio::sync::mpsc::channel::<TrayAction>(32);
 
     thread::Builder::new()
         .name("overlay-win32".to_owned())
         .spawn(move || {
-            overlay_message_loop(cmd_rx, click_tx);
+            overlay_message_loop(cmd_rx, click_tx, tray_tx);
         })
         .expect("启动 overlay 线程失败");
 
-    cmd_tx
+    (cmd_tx, tray_rx)
 }
 
 // ── 几何计算（与 Python 实现完全对应）───────────────────────────
@@ -419,6 +432,8 @@ struct WndState {
     win_h: i32,
     /// 向 tokio 发送槽位点击事件
     click_tx: tokio::sync::mpsc::Sender<usize>,
+    /// 向 tokio 发送托盘菜单动作
+    tray_tx: tokio::sync::mpsc::Sender<TrayAction>,
 }
 
 /// Win32 窗口过程
@@ -478,6 +493,9 @@ unsafe extern "system" fn overlay_wnd_proc(
                 // 构建右键菜单
                 let hmenu = CreatePopupMenu();
                 if let Ok(hmenu) = hmenu {
+                    let reload_text = to_wide("热重载客户端");
+                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_RELOAD_UX, windows::core::PCWSTR(reload_text.as_ptr()));
+                    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, windows::core::PCWSTR(std::ptr::null()));
                     let quit_text = to_wide("退出");
                     let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, windows::core::PCWSTR(quit_text.as_ptr()));
 
@@ -498,7 +516,13 @@ unsafe extern "system" fn overlay_wnd_proc(
                     let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
                     let _ = DestroyMenu(hmenu);
 
-                    if cmd.0 as usize == IDM_QUIT {
+                    let cmd_id = cmd.0 as usize;
+                    if cmd_id == IDM_RELOAD_UX {
+                        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                        if !ptr.is_null() {
+                            let _ = (*ptr).tray_tx.try_send(TrayAction::ReloadUx);
+                        }
+                    } else if cmd_id == IDM_QUIT {
                         // 对应 Python `app.quit()`：直接退出进程，
                         // Windows 会自动清理托盘图标
                         std::process::exit(0);
@@ -523,6 +547,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 fn overlay_message_loop(
     mut cmd_rx: tokio::sync::mpsc::Receiver<OverlayCmd>,
     click_tx: tokio::sync::mpsc::Sender<usize>,
+    tray_tx: tokio::sync::mpsc::Sender<TrayAction>,
 ) {
     use std::time::{Duration, Instant};
     use crate::win::winapi;
@@ -596,6 +621,7 @@ fn overlay_message_loop(
                 win_w: 1920,
                 win_h: 1080,
                 click_tx: click_tx.clone(),
+                tray_tx: tray_tx.clone(),
             });
             let state_ptr = Box::into_raw(state);
             unsafe {
