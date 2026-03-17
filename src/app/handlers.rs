@@ -398,13 +398,13 @@ pub async fn handle_champ_select(
         let api2 = api.clone();
         let session2 = session.clone();
         tokio::spawn(async move {
-            let (my_team, their_team) = extract_teams_from_session(&session2);
+            let (my_team, their_team, my_side, their_side) = extract_teams_from_session(&session2);
             if my_team.is_empty() && their_team.is_empty() {
                 return;
             }
             info!("开始组黑分析（我方{}人 / 对方{}人）...", my_team.len(), their_team.len());
             let (my_result, their_result) = analyze_premade(&api2, my_team, their_team, 3, 20).await;
-            let msg = format_premade_message(&my_result, &their_result);
+            let msg = format_premade_message(&my_result, &their_result, my_side, their_side);
             info!("{msg}");
             match api2.send_message_to_self(&msg).await {
                 Ok(()) => info!("组黑分析已私信发送给自己"),

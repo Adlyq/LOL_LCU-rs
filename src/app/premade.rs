@@ -38,10 +38,12 @@ pub struct PremadeGroup {
 
 // ── 分析入口 ──────────────────────────────────────────────────────
 
-/// 获取英雄选择 session 中双方 PUUID 列表。
+/// 获取英雄选择 session 中双方 PUUID 列表，以及各自的队伍颜色（100=蓝队，200=红队）。
 ///
-/// 返回 `(my_team, their_team)`，均为 `(puuid, summoner_name)` 对。
-pub fn extract_teams_from_session(session: &Value) -> (Vec<(String, String)>, Vec<(String, String)>) {
+/// 返回 `(my_team, their_team, my_side, their_side)`，team 均为 `(puuid, summoner_name)` 对。
+pub fn extract_teams_from_session(
+    session: &Value,
+) -> (Vec<(String, String)>, Vec<(String, String)>, Option<u32>, Option<u32>) {
     let extract = |key: &str| -> Vec<(String, String)> {
         session
             .get(key)
@@ -66,7 +68,26 @@ pub fn extract_teams_from_session(session: &Value) -> (Vec<(String, String)>, Ve
             })
             .unwrap_or_default()
     };
-    (extract("myTeam"), extract("theirTeam"))
+
+    // 从队伍数组中读取第一个合法玩家的 `team` 字段（100 或 200）
+    let read_side = |key: &str| -> Option<u32> {
+        session
+            .get(key)
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|p| {
+                    let puuid = p.get("puuid")?.as_str()?;
+                    if puuid.is_empty() || puuid == "00000000-0000-0000-0000-000000000000" {
+                        return None;
+                    }
+                    p.get("team")?.as_u64().map(|v| v as u32)
+                })
+            })
+    };
+
+    let my_side = read_side("myTeam");
+    let their_side = read_side("theirTeam");
+    (extract("myTeam"), extract("theirTeam"), my_side, their_side)
 }
 
 /// 分析双方队伍的预组队情况，返回两个 `TeamPremade`。
@@ -378,13 +399,31 @@ fn pairs<'a>(items: &[&'a str]) -> Vec<(&'a str, &'a str)> {
 // ── 格式化输出 ────────────────────────────────────────────────────
 
 /// 将两队分析结果格式化为发送到聊天的字符串。
+///
+/// `my_side` / `their_side`：队伍颜色，`100` = 蓝队，`200` = 红队，`None` = 未知。
 pub fn format_premade_message(
     my_team: &TeamPremade,
     their_team: &TeamPremade,
+    my_side: Option<u32>,
+    their_side: Option<u32>,
 ) -> String {
-    let format_team = |team: &TeamPremade| -> String {
+    fn side_label(side: Option<u32>) -> &'static str {
+        match side {
+            Some(100) => "🔵蓝队",
+            Some(200) => "🔴红队",
+            _ => "",
+        }
+    }
+
+    let format_team = |team: &TeamPremade, side: Option<u32>| -> String {
+        let side_str = side_label(side);
+        let header = if side_str.is_empty() {
+            team.team_name.clone()
+        } else {
+            format!("{} {}", team.team_name, side_str)
+        };
         if team.groups.is_empty() {
-            return format!("{}：未检测到预组队", team.team_name);
+            return format!("{header}：未检测到预组队");
         }
         let group_strs: Vec<String> = team
             .groups
@@ -398,12 +437,12 @@ pub fn format_premade_message(
                 )
             })
             .collect();
-        format!("{}：\n{}", team.team_name, group_strs.join("\n"))
+        format!("{header}：\n{}", group_strs.join("\n"))
     };
 
     format!(
         "[对局组黑分析]\n{}\n{}",
-        format_team(my_team),
-        format_team(their_team)
+        format_team(my_team, my_side),
+        format_team(their_team, their_side)
     )
 }
