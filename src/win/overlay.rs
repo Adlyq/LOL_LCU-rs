@@ -54,8 +54,8 @@ const IDM_QUIT: usize = 1001;
 /// 托盘菜单"热重载客户端"项的命令 ID
 const IDM_RELOAD_UX: usize = 1002;
 /// 托盘菜单"退出结算页面"项的命令 ID
-const IDM_PLAY_AGAIN: usize = 1003;
-
+const IDM_PLAY_AGAIN: usize = 1003;/// 托盘菜单“领取任务与宝箱”项的命令 ID
+const IDM_AUTO_LOOT: usize = 1004;
 // ── 指令类型 ─────────────────────────────────────────────────────
 
 /// 发送给 Overlay 线程的指令（tokio mpsc）。
@@ -85,6 +85,8 @@ pub enum TrayAction {
     ReloadUx,
     /// 退出结算界面，返回大厅
     PlayAgain,
+    /// 手动领取已完成任务奖励 + 开启免费宝箱
+    AutoLoot,
 }
 
 // ── Overlay 线程启动 ──────────────────────────────────────────────
@@ -501,6 +503,8 @@ unsafe extern "system" fn overlay_wnd_proc(
                     let _ = AppendMenuW(hmenu, MF_STRING, IDM_PLAY_AGAIN, windows::core::PCWSTR(play_again_text.as_ptr()));
                     let reload_text = to_wide("热重载客户端");
                     let _ = AppendMenuW(hmenu, MF_STRING, IDM_RELOAD_UX, windows::core::PCWSTR(reload_text.as_ptr()));
+                    let auto_loot_text = to_wide("领取任务与宝箱");
+                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_AUTO_LOOT, windows::core::PCWSTR(auto_loot_text.as_ptr()));
                     let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, windows::core::PCWSTR(std::ptr::null()));
                     let quit_text = to_wide("退出");
                     let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, windows::core::PCWSTR(quit_text.as_ptr()));
@@ -532,6 +536,11 @@ unsafe extern "system" fn overlay_wnd_proc(
                         let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
                         if !ptr.is_null() {
                             let _ = (*ptr).tray_tx.try_send(TrayAction::ReloadUx);
+                        }
+                    } else if cmd_id == IDM_AUTO_LOOT {
+                        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                        if !ptr.is_null() {
+                            let _ = (*ptr).tray_tx.try_send(TrayAction::AutoLoot);
                         }
                     } else if cmd_id == IDM_QUIT {
                         // 对应 Python `app.quit()`：直接退出进程，

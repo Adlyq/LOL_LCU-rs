@@ -542,4 +542,66 @@ impl LcuClient {
         ))
         .await
     }
+
+    // ── 任务 ────────────────────────────────────────────────────────
+
+    /// 获取当前账号所有任务（含进行中、已完成等）。
+    ///
+    /// `GET /lol-missions/v1/missions`
+    pub async fn get_missions(&self) -> Result<Vec<Value>, LcuApiError> {
+        let v = self.get_json("/lol-missions/v1/missions").await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
+    /// 领取指定任务的奖励。
+    ///
+    /// `POST /lol-missions/v1/missions/{id}/claim`
+    pub async fn claim_mission(&self, mission_id: &str) -> Result<(), LcuApiError> {
+        self.post_json(
+            &format!("/lol-missions/v1/missions/{mission_id}/claim"),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    // ── 战利品 ──────────────────────────────────────────────────────
+
+    /// 获取当前账号全部战利品。
+    ///
+    /// `GET /lol-loot/v1/player-loot`
+    pub async fn get_player_loot(&self) -> Result<Vec<Value>, LcuApiError> {
+        let v = self.get_json("/lol-loot/v1/player-loot").await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
+    /// 获取指定战利品的所有可用配方。
+    ///
+    /// `GET /lol-loot/v1/recipes/initial-item/{lootId}`
+    pub async fn get_loot_recipes(&self, loot_id: &str) -> Result<Vec<Value>, LcuApiError> {
+        let v = self
+            .get_json(&format!("/lol-loot/v1/recipes/initial-item/{loot_id}"))
+            .await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
+    /// 合成/开启指定战利品。
+    ///
+    /// `POST /lol-loot/v1/recipes/initial-item/{lootId}/craft?repeat={n}`
+    ///
+    /// - `ingredients`：配方所有 slot 的材料 lootId（按 slot 顺序排列）
+    /// - `repeat`：批量合成次数
+    pub async fn craft_loot(
+        &self,
+        loot_id: &str,
+        ingredients: Vec<String>,
+        repeat: u32,
+    ) -> Result<(), LcuApiError> {
+        self.post_json(
+            &format!("/lol-loot/v1/recipes/initial-item/{loot_id}/craft?repeat={repeat}"),
+            Some(json!(ingredients)),
+        )
+        .await?;
+        Ok(())
+    }
 }

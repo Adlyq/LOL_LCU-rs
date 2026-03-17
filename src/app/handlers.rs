@@ -206,6 +206,11 @@ pub async fn handle_gameflow(
             });
         }
     }
+
+    // 游戏结束后自动重置组黑分析防重复标记
+    if phase.as_deref() == Some(gameflow::END_OF_GAME) {
+        state.lock().premade_ingame_done = false;
+    }
 }
 
 // ── set_overlay_visibility_by_phase ─────────────────────────────
