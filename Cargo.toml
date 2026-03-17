@@ -1,0 +1,68 @@
+[package]
+name = "rust_app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lol_lcu"
+path = "src/main.rs"
+
+[dependencies]
+# async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client (native-tls → Windows SChannel, 零外部依赖)
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "native-tls",
+] }
+
+# WebSocket (native-tls 版本)
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tungstenite = { version = "0.24", default-features = false, features = ["native-tls"] }
+
+# TLS – 仅用 tokio-rustls 实现 AcceptAnyServerCert（WS 握手）
+# 改用 native-tls connector 代替 rustls（去掉 aws-lc-rs 依赖）
+native-tls = { version = "0.2", features = ["alpn"] }
+tokio-native-tls = "0.3"
+
+# JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+tracing-appender = "0.2"
+
+# Windows API – pure Rust bindings
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_UI_HiDpi",
+] }
+
+# Misc utilities
+anyhow = "1"
+thiserror = "1"
+base64 = "0.22"
+url = "2"
+regex = "1"
+once_cell = "1"
+parking_lot = "0.12"
+futures-util = "0.3"
+# 进程扫描（获取 LCU 进程启动参数）
+sysinfo = "0.32"
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
