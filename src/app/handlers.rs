@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 
 use crate::lcu::api::{gameflow, LcuClient};
 use crate::win::overlay::OverlayCmd;
-use crate::app::premade::{analyze_premade, extract_teams_from_session, format_premade_message};
+use crate::app::premade::{analyze_premade, extract_teams_from_session, extract_teams_from_gameflow_session, format_premade_message};
 
 use super::state::SharedState;
 
@@ -153,7 +153,7 @@ pub async fn handle_ready_check(
 
 /// 处理 Gameflow 阶段变化事件，通知 overlay 显示/隐藏。
 pub async fn handle_gameflow(
-    _api: LcuClient,
+    api: LcuClient,
     state: SharedState,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     event: Value,
@@ -164,6 +164,48 @@ pub async fn handle_gameflow(
         .map(|s| s.to_owned());
 
     set_overlay_visibility_by_phase(&state, &overlay_tx, phase.as_deref()).await;
+
+    // 进入游戏后发送含英雄名的组黑分析
+    if matches!(phase.as_deref(), Some(gameflow::IN_PROGRESS) | Some(gameflow::GAME_START)) {
+        let should_analyze = {
+            let s = state.lock();
+            !s.premade_ingame_done
+        };
+        if should_analyze {
+            state.lock().premade_ingame_done = true;
+            let api2 = api.clone();
+            tokio::spawn(async move {
+                let session = match api2.get_gameflow_session().await {
+                    Ok(s) => s,
+                    Err(e) => { warn!("获取 gameflow session 失败: {e}"); return; }
+                };
+                let me = match api2.get_current_summoner().await {
+                    Ok(v) => v,
+                    Err(e) => { warn!("获取当前召唤师失败: {e}"); return; }
+                };
+                let my_puuid = me.get("puuid").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let id_name = api2.get_champion_id_name_map().await.unwrap_or_default();
+                let (my_team, their_team, my_side, their_side) =
+                    extract_teams_from_gameflow_session(&session, &my_puuid, &id_name);
+                if my_team.is_empty() && their_team.is_empty() {
+                    return;
+                }
+                let my_side_str = match my_side { Some(100) => "蓝队", Some(200) => "红队", _ => "未知" };
+                let their_side_str = match their_side { Some(100) => "蓝队", Some(200) => "红队", _ => "未知" };
+                info!(
+                    "开始游戏中组黑分析（我方 {} {}人 / 对方 {} {}人）...",
+                    my_side_str, my_team.len(), their_side_str, their_team.len()
+                );
+                let (my_result, their_result) = analyze_premade(&api2, my_team, their_team, 3, 20).await;
+                let msg = format_premade_message(&my_result, &their_result, my_side, their_side);
+                info!("{msg}");
+                match api2.send_message_to_self(&msg).await {
+                    Ok(()) => info!("游戏中组黑分析已私信发送给自己"),
+                    Err(e) => warn!("游戏中组黑分析私信发送失败: {e}"),
+                }
+            });
+        }
+    }
 }
 
 // ── set_overlay_visibility_by_phase ─────────────────────────────
@@ -220,6 +262,7 @@ async fn reset_champ_select_state(
         }
         s.last_bench_key = None;
         s.premade_analysis_done = false;
+        s.premade_ingame_done = false;
         reset_pick_state_locked(&mut s);
         had
     };
@@ -398,17 +441,36 @@ pub async fn handle_champ_select(
         let api2 = api.clone();
         let session2 = session.clone();
         tokio::spawn(async move {
-            let (my_team, their_team, my_side, their_side) = extract_teams_from_session(&session2);
-            if my_team.is_empty() && their_team.is_empty() {
+            let (my_team_raw, their_team_raw, my_side, their_side) = extract_teams_from_session(&session2);
+            if my_team_raw.is_empty() && their_team_raw.is_empty() {
                 return;
             }
-            info!("开始组黑分析（我方{}人 / 对方{}人）...", my_team.len(), their_team.len());
+            let my_side_str = match my_side {
+                Some(100) => "蓝队",
+                Some(200) => "红队",
+                _ => "未知",
+            };
+            let their_side_str = match their_side {
+                Some(100) => "蓝队",
+                Some(200) => "红队",
+                _ => "未知",
+            };
+            info!(
+                "开始选人阶段组黑分析（我方 {} {}人 / 对方 {} {}人）...",
+                my_side_str, my_team_raw.len(),
+                their_side_str, their_team_raw.len()
+            );
+
+            // 选人阶段仅显示召唤师名，不显示英雄（英雄未必锁定）
+            let my_team: Vec<(String, String)> = my_team_raw.into_iter().map(|(p, n, _)| (p, n)).collect();
+            let their_team: Vec<(String, String)> = their_team_raw.into_iter().map(|(p, n, _)| (p, n)).collect();
+
             let (my_result, their_result) = analyze_premade(&api2, my_team, their_team, 3, 20).await;
             let msg = format_premade_message(&my_result, &their_result, my_side, their_side);
             info!("{msg}");
             match api2.send_message_to_self(&msg).await {
-                Ok(()) => info!("组黑分析已私信发送给自己"),
-                Err(e) => warn!("组黑分析私信发送失败: {e}"),
+                Ok(()) => info!("选人阶段组黑分析已私信发送给自己"),
+                Err(e) => warn!("选人阶段组黑分析私信发送失败: {e}"),
             }
         });
     }

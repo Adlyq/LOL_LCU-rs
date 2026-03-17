@@ -40,11 +40,13 @@ pub struct PremadeGroup {
 
 /// 获取英雄选择 session 中双方 PUUID 列表，以及各自的队伍颜色（100=蓝队，200=红队）。
 ///
-/// 返回 `(my_team, their_team, my_side, their_side)`，team 均为 `(puuid, summoner_name)` 对。
+/// 返回 `(my_team, their_team, my_side, their_side)`，
+/// team 均为 `(puuid, summoner_name, champion_id)` 三元组；
+/// `champion_id` 优先取 `championId`（已锁定），为 0 时回退到 `championPickIntent`（悬停意向）。
 pub fn extract_teams_from_session(
     session: &Value,
-) -> (Vec<(String, String)>, Vec<(String, String)>, Option<u32>, Option<u32>) {
-    let extract = |key: &str| -> Vec<(String, String)> {
+) -> (Vec<(String, String, i64)>, Vec<(String, String, i64)>, Option<u32>, Option<u32>) {
+    let extract = |key: &str| -> Vec<(String, String, i64)> {
         session
             .get(key)
             .and_then(|v| v.as_array())
@@ -62,7 +64,18 @@ pub fn extract_teams_from_session(
                             .and_then(|v| v.as_str())
                             .unwrap_or(puuid)
                             .to_owned();
-                        Some((puuid.to_owned(), name))
+                        // 优先锁定英雄，退回到悬停意向
+                        let champ_id = p
+                            .get("championId")
+                            .and_then(|v| v.as_i64())
+                            .filter(|&id| id != 0)
+                            .or_else(|| {
+                                p.get("championPickIntent")
+                                    .and_then(|v| v.as_i64())
+                                    .filter(|&id| id != 0)
+                            })
+                            .unwrap_or(0);
+                        Some((puuid.to_owned(), name, champ_id))
                     })
                     .collect()
             })
@@ -92,7 +105,7 @@ pub fn extract_teams_from_session(
 
 /// 分析双方队伍的预组队情况，返回两个 `TeamPremade`。
 ///
-/// - `my_team` / `their_team`：`(puuid, display_name)` 列表
+/// - `my_team` / `their_team`：`(puuid, display_name)` 列表（display_name 已含英雄信息）
 /// - `threshold`：认定为预组队的最低同队场次（建议 3）
 /// - `history_count`：每人拉取的战绩场数（建议 20）
 pub async fn analyze_premade(
@@ -394,6 +407,72 @@ fn pairs<'a>(items: &[&'a str]) -> Vec<(&'a str, &'a str)> {
         }
     }
     result
+}
+
+/// 从 gameflow session 中提取双方队伍信息（游戏进行中使用），显示名含英雄名。
+///
+/// - `my_puuid`：本地玩家 PUUID，用于区分我方 / 对方
+/// - `id_name_map`：英雄 ID → 名称映射
+///
+/// teamOne = 蓝队（100），teamTwo = 红队（200）。
+pub fn extract_teams_from_gameflow_session(
+    session: &Value,
+    my_puuid: &str,
+    id_name_map: &std::collections::HashMap<i64, String>,
+) -> (Vec<(String, String)>, Vec<(String, String)>, Option<u32>, Option<u32>) {
+    let game_data = match session.get("gameData") {
+        Some(v) => v,
+        None => return (vec![], vec![], None, None),
+    };
+
+    let extract_team = |key: &str| -> Vec<(String, String)> {
+        game_data
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let puuid = p.get("puuid")?.as_str()?;
+                        if puuid.is_empty() || puuid == "00000000-0000-0000-0000-000000000000" {
+                            return None;
+                        }
+                        let name = p
+                            .get("summonerName")
+                            .or_else(|| p.get("gameName"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(puuid)
+                            .to_owned();
+                        let champ_id = p
+                            .get("championId")
+                            .and_then(|v| v.as_i64())
+                            .filter(|&id| id != 0)
+                            .unwrap_or(0);
+                        let label = if champ_id != 0 {
+                            if let Some(cname) = id_name_map.get(&champ_id) {
+                                format!("{name}({cname})")
+                            } else {
+                                name
+                            }
+                        } else {
+                            name
+                        };
+                        Some((puuid.to_owned(), label))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let team_one = extract_team("teamOne"); // 蓝队 100
+    let team_two = extract_team("teamTwo"); // 红队 200
+
+    // 根据本地玩家所在队伍确定我方 / 对方
+    let my_in_one = team_one.iter().any(|(p, _)| p == my_puuid);
+    if my_in_one {
+        (team_one, team_two, Some(100), Some(200))
+    } else {
+        (team_two, team_one, Some(200), Some(100))
+    }
 }
 
 // ── 格式化输出 ────────────────────────────────────────────────────

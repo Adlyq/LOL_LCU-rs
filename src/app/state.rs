@@ -36,8 +36,10 @@ pub struct RuntimeState {
     pub last_post_honor_continue_game_id: Option<i64>,
 
     // ── 组黑分析 ─────────────────────────────────────────
-    /// 本局是否已发送过组黑分析（去重）
+    /// 选人阶段是否已发送过组黑分析（去重）
     pub premade_analysis_done: bool,
+    /// 游戏中是否已发送过含英雄的组黑分析（去重）
+    pub premade_ingame_done: bool,
 }
 
 impl Default for RuntimeState {
@@ -60,6 +62,7 @@ impl RuntimeState {
             last_honor_skip_ts: std::time::Instant::now(),
             last_post_honor_continue_game_id: None,
             premade_analysis_done: false,
+            premade_ingame_done: false,
         }
     }
 
@@ -82,6 +85,7 @@ impl RuntimeState {
         self.ready_check_pending_accept = false;
         self.ready_check_generation += 1;
         self.premade_analysis_done = false;
+        self.premade_ingame_done = false;
         // last_skipped_honor_game_id / last_honor_skip_ts / last_post_honor_continue_game_id
         // 刻意保留，避免重连后对同一局重复执行
     }
