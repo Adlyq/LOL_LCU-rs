@@ -34,6 +34,10 @@ pub struct RuntimeState {
     pub last_honor_skip_ts: std::time::Instant,
     /// 上次已尝试点击"继续"按钮的 game_id
     pub last_post_honor_continue_game_id: Option<i64>,
+
+    // ── 组黑分析 ─────────────────────────────────────────
+    /// 本局是否已发送过组黑分析（去重）
+    pub premade_analysis_done: bool,
 }
 
 impl Default for RuntimeState {
@@ -55,6 +59,7 @@ impl RuntimeState {
             last_skipped_honor_game_id: None,
             last_honor_skip_ts: std::time::Instant::now(),
             last_post_honor_continue_game_id: None,
+            premade_analysis_done: false,
         }
     }
 
@@ -76,6 +81,7 @@ impl RuntimeState {
         self.pick_generation += 1;
         self.ready_check_pending_accept = false;
         self.ready_check_generation += 1;
+        self.premade_analysis_done = false;
         // last_skipped_honor_game_id / last_honor_skip_ts / last_post_honor_continue_game_id
         // 刻意保留，避免重连后对同一局重复执行
     }

@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use crate::lcu::api::{gameflow, LcuClient};
 use crate::win::overlay::OverlayCmd;
+use crate::app::premade::{analyze_premade, extract_teams_from_session, format_premade_message};
 
 use super::state::SharedState;
 
@@ -218,6 +219,7 @@ async fn reset_champ_select_state(
             s.current_bench_ids.clear();
         }
         s.last_bench_key = None;
+        s.premade_analysis_done = false;
         reset_pick_state_locked(&mut s);
         had
     };
@@ -385,6 +387,31 @@ pub async fn handle_champ_select(
 
     // WS payload 的 data 字段即为完整 session，无需额外 HTTP GET
     let session = event_data(&event).unwrap().clone();
+
+    // ── 组黑分析（每局只触发一次）──────────────────────────────────
+    let should_analyze = {
+        let s = state.lock();
+        !s.premade_analysis_done
+    };
+    if should_analyze {
+        state.lock().premade_analysis_done = true;
+        let api2 = api.clone();
+        let session2 = session.clone();
+        tokio::spawn(async move {
+            let (my_team, their_team) = extract_teams_from_session(&session2);
+            if my_team.is_empty() && their_team.is_empty() {
+                return;
+            }
+            info!("开始组黑分析（我方{}人 / 对方{}人）...", my_team.len(), their_team.len());
+            let (my_result, their_result) = analyze_premade(&api2, my_team, their_team, 3, 20).await;
+            let msg = format_premade_message(&my_result, &their_result);
+            info!("{msg}");
+            match api2.send_message_to_self(&msg).await {
+                Ok(()) => info!("组黑分析已私信发送给自己"),
+                Err(e) => warn!("组黑分析私信发送失败: {e}"),
+            }
+        });
+    }
 
     // 非大乱斗模式（benchEnabled = false），重置状态
     if !session
