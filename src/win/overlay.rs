@@ -21,8 +21,10 @@ use tracing::{debug, info, warn};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+use crate::app::config::SharedConfig;
+use crate::win::info_panel::{InfoPanel, PanelAction};
 
 // ── 布局常量（对应 Python 模板坐标）─────────────────────────────
 
@@ -43,19 +45,7 @@ const SLOT_SIZE: f64 = 70.0;
 /// Bench 最大席位数（固定为 10，与大乱斗展示一致）
 const BENCH_SLOT_COUNT: usize = 10;
 
-// ── 托盘常量 ─────────────────────────────────────────────────────
 
-/// 托盘通知回调消息（WM_USER+100，避免与系统消息冲突）
-const WM_TRAY_ICON: u32 = WM_USER + 100;
-/// 托盘图标 ID（同一进程唯一即可）
-const TRAY_UID: u32 = 1;
-/// 托盘菜单"退出"项的命令 ID
-const IDM_QUIT: usize = 1001;
-/// 托盘菜单"热重载客户端"项的命令 ID
-const IDM_RELOAD_UX: usize = 1002;
-/// 托盘菜单"退出结算页面"项的命令 ID
-const IDM_PLAY_AGAIN: usize = 1003;/// 托盘菜单“领取任务与宝箱”项的命令 ID
-const IDM_AUTO_LOOT: usize = 1004;
 // ── 指令类型 ─────────────────────────────────────────────────────
 
 /// 发送给 Overlay 线程的指令（tokio mpsc）。
@@ -74,19 +64,10 @@ pub enum OverlayCmd {
     SetSelectedSlot(usize),
     /// 触发窗口自动修复（zoom_scale）
     AutoFixWindow(f64),
+    /// 更新信息面板内容
+    UpdatePanel(crate::win::info_panel::PanelContent),
     /// 退出消息循环
     Quit,
-}
-
-/// 托盘菜单动作（overlay 线程 → tokio 的单向事件）。
-#[derive(Debug, Clone)]
-pub enum TrayAction {
-    /// 热重载 LCU 客户端 UX（不断开排队 / 游戏连接）
-    ReloadUx,
-    /// 退出结算界面，返回大厅
-    PlayAgain,
-    /// 手动领取已完成任务奖励 + 开启免费宝箱
-    AutoLoot,
 }
 
 // ── Overlay 线程启动 ──────────────────────────────────────────────
@@ -96,21 +77,19 @@ pub enum TrayAction {
 /// 点击回调通过 `click_tx`（tokio::sync::mpsc）发送到 tokio 侧。
 pub fn spawn_overlay_thread(
     click_tx: tokio::sync::mpsc::Sender<usize>,
-) -> (
-    tokio::sync::mpsc::Sender<OverlayCmd>,
-    tokio::sync::mpsc::Receiver<TrayAction>,
-) {
+    config: SharedConfig,
+    action_tx: tokio::sync::mpsc::Sender<PanelAction>,
+) -> tokio::sync::mpsc::Sender<OverlayCmd> {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<OverlayCmd>(256);
-    let (tray_tx, tray_rx) = tokio::sync::mpsc::channel::<TrayAction>(32);
 
     thread::Builder::new()
         .name("overlay-win32".to_owned())
         .spawn(move || {
-            overlay_message_loop(cmd_rx, click_tx, tray_tx);
+            overlay_message_loop(cmd_rx, click_tx, action_tx, config);
         })
         .expect("启动 overlay 线程失败");
 
-    (cmd_tx, tray_rx)
+    cmd_tx
 }
 
 // ── 几何计算（与 Python 实现完全对应）───────────────────────────
@@ -438,8 +417,6 @@ struct WndState {
     win_h: i32,
     /// 向 tokio 发送槽位点击事件
     click_tx: tokio::sync::mpsc::Sender<usize>,
-    /// 向 tokio 发送托盘菜单动作
-    tray_tx: tokio::sync::mpsc::Sender<TrayAction>,
 }
 
 /// Win32 窗口过程
@@ -492,66 +469,6 @@ unsafe extern "system" fn overlay_wnd_proc(
             LRESULT(0)
         }
 
-        // 托盘图标通知回调
-        WM_TRAY_ICON => {
-            let event = (lparam.0 as u32) & 0xFFFF;
-            if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
-                // 构建右键菜单
-                let hmenu = CreatePopupMenu();
-                if let Ok(hmenu) = hmenu {
-                    let play_again_text = to_wide("退出结算页面");
-                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_PLAY_AGAIN, windows::core::PCWSTR(play_again_text.as_ptr()));
-                    let reload_text = to_wide("热重载客户端");
-                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_RELOAD_UX, windows::core::PCWSTR(reload_text.as_ptr()));
-                    let auto_loot_text = to_wide("领取任务与宝箱");
-                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_AUTO_LOOT, windows::core::PCWSTR(auto_loot_text.as_ptr()));
-                    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, windows::core::PCWSTR(std::ptr::null()));
-                    let quit_text = to_wide("退出");
-                    let _ = AppendMenuW(hmenu, MF_STRING, IDM_QUIT, windows::core::PCWSTR(quit_text.as_ptr()));
-
-                    let mut pt = POINT::default();
-                    let _ = GetCursorPos(&mut pt);
-                    // SetForegroundWindow 确保菜单在失焦后能自动关闭（托盘经典做法）
-                    let _ = SetForegroundWindow(hwnd);
-                    let cmd = TrackPopupMenu(
-                        hmenu,
-                        TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                        pt.x,
-                        pt.y,
-                        0,
-                        hwnd,
-                        None,
-                    );
-                    // 修复 SetForegroundWindow 后台化的任务栏 bug
-                    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
-                    let _ = DestroyMenu(hmenu);
-
-                    let cmd_id = cmd.0 as usize;
-                    if cmd_id == IDM_PLAY_AGAIN {
-                        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
-                        if !ptr.is_null() {
-                            let _ = (*ptr).tray_tx.try_send(TrayAction::PlayAgain);
-                        }
-                    } else if cmd_id == IDM_RELOAD_UX {
-                        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
-                        if !ptr.is_null() {
-                            let _ = (*ptr).tray_tx.try_send(TrayAction::ReloadUx);
-                        }
-                    } else if cmd_id == IDM_AUTO_LOOT {
-                        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
-                        if !ptr.is_null() {
-                            let _ = (*ptr).tray_tx.try_send(TrayAction::AutoLoot);
-                        }
-                    } else if cmd_id == IDM_QUIT {
-                        // 对应 Python `app.quit()`：直接退出进程，
-                        // Windows 会自动清理托盘图标
-                        std::process::exit(0);
-                    }
-                }
-            }
-            LRESULT(0)
-        }
-
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -567,7 +484,8 @@ fn to_wide(s: &str) -> Vec<u16> {
 fn overlay_message_loop(
     mut cmd_rx: tokio::sync::mpsc::Receiver<OverlayCmd>,
     click_tx: tokio::sync::mpsc::Sender<usize>,
-    tray_tx: tokio::sync::mpsc::Sender<TrayAction>,
+    action_tx: tokio::sync::mpsc::Sender<PanelAction>,
+    config: SharedConfig,
 ) {
     use std::time::{Duration, Instant};
     use crate::win::winapi;
@@ -580,7 +498,7 @@ fn overlay_message_loop(
     let mut visible = false;
     let mut target_hwnd: Option<HWND> = None;
     let mut overlay_hwnd: Option<HWND> = None;
-    let mut tray_added = false;      // 托盘图标是否已注册
+    let mut info_panel: Option<InfoPanel> = None;
     let mut last_sync = Instant::now();
     let mut last_redraw = Instant::now();
 
@@ -641,15 +559,14 @@ fn overlay_message_loop(
                 win_w: 1920,
                 win_h: 1080,
                 click_tx: click_tx.clone(),
-                tray_tx: tray_tx.clone(),
             });
             let state_ptr = Box::into_raw(state);
             unsafe {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
             }
 
-            // ── 添加系统托盘图标 ─────────────────────────
-            unsafe { tray_added = add_tray_icon(hwnd); }
+            // 启动 egui 信息面板线程
+            info_panel = InfoPanel::spawn(config, action_tx);
         }
         Err(e) => {
             warn!("创建 Overlay 窗口失败: {e}，将以无 GUI 模式运行");
@@ -704,14 +621,15 @@ fn overlay_message_loop(
                             winapi::fix_lcu_window_by_zoom(hwnd, zoom, false);
                         }
                     }
+                    OverlayCmd::UpdatePanel(content) => {
+                        if let Some(ref panel) = info_panel {
+                            panel.update(|c| *c = content);
+                        }
+                    }
                     OverlayCmd::Quit => {
                         info!("Overlay: Quit");
-                        // 先移除托盘图标，再销毁窗口
                         if let Some(hwnd) = overlay_hwnd {
                             unsafe {
-                                if tray_added {
-                                    remove_tray_icon(hwnd);
-                                }
                                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WndState;
                                 if !ptr.is_null() {
                                     drop(Box::from_raw(ptr));
@@ -728,9 +646,6 @@ fn overlay_message_loop(
                     info!("Overlay 指令通道已关闭，退出线程");
                     if let Some(hwnd) = overlay_hwnd {
                         unsafe {
-                            if tray_added {
-                                remove_tray_icon(hwnd);
-                            }
                             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WndState;
                             if !ptr.is_null() {
                                 drop(Box::from_raw(ptr));
@@ -818,56 +733,4 @@ fn overlay_message_loop(
         // 每帧休眠，间隔跟随系统刷新率
         thread::sleep(frame_duration);
     }
-}
-
-// ── 托盘图标辅助 ──────────────────────────────────────────────────
-
-/// 向系统注册托盘图标，返回是否成功。
-///
-/// - 图标优先从 exe 内嵌资源（resource ID 1，由 build.rs + winres 编译）加载，
-///   失败时降级到系统默认图标 `IDI_APPLICATION`。
-/// - Tooltip 固定为 `"LOL_LCU"`（对应 Python `tray.setToolTip("LOL_LCU")`）。
-unsafe fn add_tray_icon(hwnd: HWND) -> bool {
-    let hinstance = GetModuleHandleW(None)
-        .map(|h| HINSTANCE(h.0))
-        .unwrap_or_default();
-
-    // 加载内嵌图标（winres 默认资源 ID = 1）
-    let hicon = LoadIconW(hinstance, windows::core::PCWSTR(1usize as *const u16))
-        .or_else(|_| LoadIconW(HINSTANCE::default(), IDI_APPLICATION))
-        .unwrap_or_default();
-
-    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = TRAY_UID;
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    nid.uCallbackMessage = WM_TRAY_ICON;
-    nid.hIcon = hicon;
-
-    // Tooltip（最多 127 个 UTF-16 码元 + 空终止符）
-    let tip = "LOL_LCU";
-    for (i, c) in tip.encode_utf16().enumerate() {
-        if i >= 127 {
-            break;
-        }
-        nid.szTip[i] = c;
-    }
-
-    let ok = Shell_NotifyIconW(NIM_ADD, &nid).as_bool();
-    if ok {
-        info!("系统托盘图标已添加");
-    } else {
-        warn!("添加系统托盘图标失败（Shell_NotifyIconW NIM_ADD）");
-    }
-    ok
-}
-
-/// 从系统注销托盘图标。
-unsafe fn remove_tray_icon(hwnd: HWND) {
-    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uID = TRAY_UID;
-    let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
 }

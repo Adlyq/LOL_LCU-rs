@@ -37,10 +37,12 @@ use tracing::{error, info, warn};
 
 use app::handlers;
 use app::state::new_shared_state;
+use app::config::new_shared_config;
 use lcu::api::LcuClient;
 use lcu::connection::{build_client, wait_for_credentials};
 use lcu::websocket::{spawn_ws_loop, LcuEvent};
-use win::overlay::{spawn_overlay_thread, OverlayCmd, TrayAction};
+use win::overlay::{spawn_overlay_thread, OverlayCmd};
+use win::info_panel::PanelAction;
 
 /// 重连等待时间（对应 Python `RECONNECT_DELAY_SECONDS`）
 const RECONNECT_DELAY_SECS: u64 = 5;
@@ -128,7 +130,9 @@ async fn main() {
     // 启动 overlay 线程（Win32 消息循环）
     // click_tx: overlay 线程 → tokio 的槽位点击事件
     let (click_tx, mut click_rx) = mpsc::channel::<usize>(32);
-    let (overlay_tx, mut tray_rx) = spawn_overlay_thread(click_tx);
+    let config = new_shared_config();
+    let (action_tx, mut action_rx) = mpsc::channel::<PanelAction>(32);
+    let overlay_tx = spawn_overlay_thread(click_tx, config.clone(), action_tx);
 
     // --show-overlay：线程刚启动，稍等窗口创建完成后立即 Show
     #[cfg(debug_assertions)]
@@ -140,7 +144,7 @@ async fn main() {
     let state = new_shared_state();
 
     // 主重连循环
-    run_with_reconnect(state.clone(), overlay_tx.clone(), &mut click_rx, &mut tray_rx).await;
+    run_with_reconnect(state.clone(), config, overlay_tx.clone(), &mut click_rx, &mut action_rx).await;
 
     // 退出前通知 overlay 线程退出
     let _ = overlay_tx.send(OverlayCmd::Quit).await;
@@ -151,14 +155,15 @@ async fn main() {
 
 async fn run_with_reconnect(
     state: app::state::SharedState,
+    config: app::config::SharedConfig,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     click_rx: &mut mpsc::Receiver<usize>,
-    tray_rx: &mut mpsc::Receiver<TrayAction>,
+    action_rx: &mut mpsc::Receiver<PanelAction>,
 ) {
     loop {
         info!("正在连接 LCU...");
 
-        match run_once(state.clone(), overlay_tx.clone(), click_rx, tray_rx).await {
+        match run_once(state.clone(), config.clone(), overlay_tx.clone(), click_rx, action_rx).await {
             Ok(()) => {
                 info!("主循环正常结束");
             }
@@ -169,7 +174,13 @@ async fn run_with_reconnect(
 
         // 重连前清理会话状态（对应 Python 每次重连都新建 RuntimeState()）
         state.lock().reset_session();
-
+        // 面板显示等待状态
+        let _ = overlay_tx.send(win::overlay::OverlayCmd::UpdatePanel(
+            win::info_panel::PanelContent {
+                connection: "等待连接...".to_owned(),
+                ..Default::default()
+            }
+        )).await;
         // 重置 overlay 状态（--show-overlay 时跳过 Hide）
         #[cfg(debug_assertions)]
         if !crate::DEBUG_SHOW_OVERLAY.load(std::sync::atomic::Ordering::Relaxed) {
@@ -179,8 +190,8 @@ async fn run_with_reconnect(
         let _ = overlay_tx.send(OverlayCmd::Hide).await;
         let _ = overlay_tx.send(OverlayCmd::SetBenchIds(vec![])).await;
 
-        // 清空断线期间积压的托盘动作，避免重连后误触发
-        while tray_rx.try_recv().is_ok() {}
+        // 清空断线期间积压的面板动作，避免重连后误触发
+        while action_rx.try_recv().is_ok() {}
 
         info!("{RECONNECT_DELAY_SECS} 秒后尝试重连...");
         sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
@@ -191,9 +202,10 @@ async fn run_with_reconnect(
 
 async fn run_once(
     state: app::state::SharedState,
+    config: app::config::SharedConfig,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     click_rx: &mut mpsc::Receiver<usize>,
-    tray_rx: &mut mpsc::Receiver<TrayAction>,
+    action_rx: &mut mpsc::Receiver<PanelAction>,
 ) -> anyhow::Result<()> {
     // 扫描进程列表，等待 LCU 进程出现（对应 willump 的初始化循环）
     let creds = wait_for_credentials().await;
@@ -216,8 +228,18 @@ async fn run_once(
     let display_name = summoner
         .get("displayName")
         .and_then(|v| v.as_str())
-        .unwrap_or("<未知>");
+        .unwrap_or("<未知>")
+        .to_owned();
     info!("召唤师: {display_name}");
+
+    // 初始化面板连接状态
+    let _ = overlay_tx.send(win::overlay::OverlayCmd::UpdatePanel(
+        win::info_panel::PanelContent {
+            connection: format!("已连接 · {display_name}"),
+            phase: phase.clone(),
+            ..Default::default()
+        }
+    )).await;
 
     info!("已开始监听，Ctrl+C 退出");
 
@@ -230,8 +252,9 @@ async fn run_once(
 
     // 启动内存监控后台任务（功能 10：LeagueClientUx 内存超限自动热重载）
     let mem_api = api.clone();
+    let mem_cfg = config.clone();
     let mem_monitor_task = tokio::spawn(async move {
-        memory_monitor_loop(mem_api).await;
+        memory_monitor_loop(mem_api, mem_cfg).await;
     });
 
     // 订阅 WebSocket 各事件频道
@@ -244,9 +267,10 @@ async fn run_once(
     let result = main_loop(
         api,
         state,
+        config,
         overlay_tx.clone(),
         click_rx,
-        tray_rx,
+        action_rx,
         &mut rx_gameflow,
         &mut rx_ready_check,
         &mut rx_honor,
@@ -266,9 +290,10 @@ async fn run_once(
 async fn main_loop(
     api: LcuClient,
     state: app::state::SharedState,
+    config: app::config::SharedConfig,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     click_rx: &mut mpsc::Receiver<usize>,
-    tray_rx: &mut mpsc::Receiver<TrayAction>,
+    action_rx: &mut mpsc::Receiver<PanelAction>,
     rx_gameflow: &mut tokio::sync::broadcast::Receiver<LcuEvent>,
     rx_ready_check: &mut tokio::sync::broadcast::Receiver<LcuEvent>,
     rx_honor: &mut tokio::sync::broadcast::Receiver<LcuEvent>,
@@ -282,9 +307,10 @@ async fn main_loop(
                     Ok(event) if event.uri == "/lol-gameflow/v1/gameflow-phase" => {
                         let api2 = api.clone();
                         let state2 = state.clone();
+                        let cfg2 = config.clone();
                         let tx2 = overlay_tx.clone();
                         tokio::spawn(async move {
-                            handlers::handle_gameflow(api2, state2, tx2, event.payload).await;
+                            handlers::handle_gameflow(api2, state2, cfg2, tx2, event.payload).await;
                         });
                     }
                     Ok(_) => {}
@@ -303,8 +329,9 @@ async fn main_loop(
                     Ok(event) if event.uri == "/lol-matchmaking/v1/ready-check" => {
                         let api2 = api.clone();
                         let state2 = state.clone();
+                        let cfg2 = config.clone();
                         tokio::spawn(async move {
-                            handlers::handle_ready_check(api2, state2, event.payload).await;
+                            handlers::handle_ready_check(api2, state2, cfg2, event.payload).await;
                         });
                     }
                     Ok(_) => {}
@@ -323,9 +350,10 @@ async fn main_loop(
                     Ok(event) if event.uri == "/lol-honor-v2/v1/ballot" => {
                         let api2 = api.clone();
                         let state2 = state.clone();
+                        let cfg2 = config.clone();
                         let tx2 = overlay_tx.clone();
                         tokio::spawn(async move {
-                            handlers::handle_honor_ballot(api2, state2, tx2, event.payload).await;
+                            handlers::handle_honor_ballot(api2, state2, cfg2, tx2, event.payload).await;
                         });
                     }
                     Ok(_) => {}
@@ -344,9 +372,10 @@ async fn main_loop(
                     Ok(event) if event.uri == "/lol-champ-select/v1/session" => {
                         let api2 = api.clone();
                         let state2 = state.clone();
+                        let cfg2 = config.clone();
                         let tx2 = overlay_tx.clone();
                         tokio::spawn(async move {
-                            handlers::handle_champ_select(api2, state2, tx2, event.payload).await;
+                            handlers::handle_champ_select(api2, state2, cfg2, tx2, event.payload).await;
                         });
                     }
                     Ok(_) => {}
@@ -376,10 +405,10 @@ async fn main_loop(
                 }
             }
 
-            // ── 托盘菜单动作 ─────────────────────────────
-            action = tray_rx.recv() => {
+            // ── 面板动作 ─────────────────────────────────
+            action = action_rx.recv() => {
                 match action {
-                    Some(TrayAction::ReloadUx) => {
+                    Some(PanelAction::ReloadUx) => {
                         info!("正在热重载 LCU 客户端...");
                         let api2 = api.clone();
                         tokio::spawn(async move {
@@ -389,7 +418,7 @@ async fn main_loop(
                             }
                         });
                     }
-                    Some(TrayAction::PlayAgain) => {
+                    Some(PanelAction::PlayAgain) => {
                         info!("正在退出结算页面...");
                         let api2 = api.clone();
                         tokio::spawn(async move {
@@ -399,15 +428,19 @@ async fn main_loop(
                             }
                         });
                     }
-                    Some(TrayAction::AutoLoot) => {
+                    Some(PanelAction::AutoLoot) => {
                         info!("手动触发领取任务与宝箱...");
                         let api2 = api.clone();
                         tokio::spawn(async move {
                             app::loot::run_auto_loot(&api2).await;
                         });
                     }
+                    Some(PanelAction::Quit) => {
+                        info!("用户请求退出");
+                        std::process::exit(0);
+                    }
                     None => {
-                        warn!("tray_rx 通道已关闭");
+                        warn!("action_rx 通道已关闭");
                     }
                 }
             }
@@ -420,8 +453,7 @@ async fn main_loop(
 /// 每 5 分钟检查一次 `LeagueClientUx.exe` 内存占用；
 /// 超过阈值（1500 MB）且当前处于大厅/空闲阶段时，自动触发热重载。
 /// 热重载后进入 30 分钟冷却期，避免频繁重载。
-async fn memory_monitor_loop(api: lcu::api::LcuClient) {
-    const THRESHOLD_MB: u64 = 1500;
+async fn memory_monitor_loop(api: lcu::api::LcuClient, config: app::config::SharedConfig) {
     const CHECK_INTERVAL_SECS: u64 = 5 * 60;
     const COOLDOWN_SECS: u64 = 30 * 60;
 
@@ -432,6 +464,15 @@ async fn memory_monitor_loop(api: lcu::api::LcuClient) {
 
     loop {
         sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+
+        // 判断配置是否开启
+        let (enabled, threshold_mb) = {
+            let cfg = config.lock();
+            (cfg.memory_monitor, cfg.memory_threshold_mb)
+        };
+        if !enabled {
+            continue;
+        }
 
         // 冷却期内跳过
         if let Some(t) = last_reload {
@@ -455,13 +496,13 @@ async fn memory_monitor_loop(api: lcu::api::LcuClient) {
             continue; // 进程未找到
         }
 
-        if mem_mb < THRESHOLD_MB {
+        if mem_mb < threshold_mb {
             tracing::debug!("LeagueClientUx 内存 {mem_mb} MB，正常");
             continue;
         }
 
         warn!(
-            "LeagueClientUx 内存 {mem_mb} MB 超过阈值 {THRESHOLD_MB} MB，阶段={phase}，触发自动热重载..."
+            "LeagueClientUx 内存 {mem_mb} MB 超过阈値 {threshold_mb} MB，阶段={phase}，触发自动热重载..."
         );
         match api.reload_ux().await {
             Ok(()) => {

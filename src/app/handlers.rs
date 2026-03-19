@@ -22,12 +22,15 @@ use tracing::{debug, info, warn};
 
 use crate::lcu::api::{gameflow, LcuClient};
 use crate::win::overlay::OverlayCmd;
+use crate::win::info_panel::PanelContent;
 use crate::app::premade::{analyze_premade, extract_teams_from_session, extract_teams_from_gameflow_session, format_premade_message};
+use crate::app::config::SharedConfig;
 
 use super::state::SharedState;
 
 // ── 常量（对应 Python 侧同名变量）──────────────────────────────────
 
+#[allow(dead_code)]
 const READY_CHECK_ACCEPT_DELAY_SECS: u64 = 5;
 const HONOR_SKIP_FALLBACK_COOLDOWN_SECS: u64 = 30;
 const POSTGAME_CONTINUE_DELAY_SECS: f64 = 0.8;
@@ -47,11 +50,12 @@ fn event_data(event: &Value) -> Option<&Value> {
 ///
 /// 逻辑与 Python 完全一致：
 /// 1. 若 state != InProgress 或 playerResponse 已设置，重置待接受标志；
-/// 2. 延迟 5 秒后重新获取 ready-check 状态，再接受；
+/// 2. 延迟若干秒后重新获取 ready-check 状态，再接受；
 /// 3. 代次机制确保旧事件不会影响新局。
 pub async fn handle_ready_check(
     api: LcuClient,
     state: SharedState,
+    config: SharedConfig,
     event: Value,
 ) {
     let data = match event_data(&event) {
@@ -72,6 +76,16 @@ pub async fn handle_ready_check(
         return;
     }
 
+    // 检查配置是否开启自动接受
+    let (enabled, delay_secs) = {
+        let cfg = config.lock();
+        (cfg.auto_accept_enabled, cfg.auto_accept_delay_secs)
+    };
+    if !enabled {
+        debug!("[ready-check] 自动接受已关闭，跳过");
+        return;
+    }
+
     let already_pending = {
         let s = state.lock();
         s.ready_check_pending_accept
@@ -86,8 +100,8 @@ pub async fn handle_ready_check(
         s.ready_check_generation
     };
 
-    info!("检测到 Ready Check，{READY_CHECK_ACCEPT_DELAY_SECS} 秒后自动接受（如需拒绝请手动操作）...");
-    sleep(Duration::from_secs(READY_CHECK_ACCEPT_DELAY_SECS)).await;
+    info!("检测到 Ready Check，{delay_secs} 秒后自动接受（如需拒绝请手动操作）...");
+    sleep(Duration::from_secs(delay_secs)).await;
 
     // 检查状态是否已被取消
     {
@@ -155,6 +169,7 @@ pub async fn handle_ready_check(
 pub async fn handle_gameflow(
     api: LcuClient,
     state: SharedState,
+    config: SharedConfig,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     event: Value,
 ) {
@@ -165,15 +180,39 @@ pub async fn handle_gameflow(
 
     set_overlay_visibility_by_phase(&state, &overlay_tx, phase.as_deref()).await;
 
-    // 进入游戏后发送含英雄名的组黑分析
+    // 更新信息面板：连接状态 + 当前阶段
+    {
+        let phase_display = match phase.as_deref() {
+            Some(gameflow::NONE) | None => "空闲",
+            Some(gameflow::LOBBY) => "大厅",
+            Some(gameflow::MATCHMAKING) => "匹配中",
+            Some(gameflow::READY_CHECK) => "准备确认",
+            Some(gameflow::CHAMP_SELECT) => "选人阶段",
+            Some(gameflow::GAME_START) => "游戏开始",
+            Some(gameflow::IN_PROGRESS) => "游戏中",
+            Some(gameflow::RECONNECT) => "重连中",
+            Some(gameflow::WAITING_FOR_STATS) => "等待结算",
+            Some(gameflow::PRE_END_OF_GAME) => "结算前",
+            Some(gameflow::END_OF_GAME) => "结算页面",
+            Some(gameflow::TERMINATED_IN_ERROR) => "异常终止",
+            Some(s) => s,
+        };
+        let _ = overlay_tx.send(OverlayCmd::UpdatePanel(PanelContent {
+            connection: "已连接".to_owned(),
+            phase: phase_display.to_owned(),
+            ..Default::default()
+        })).await;
+    }
     if matches!(phase.as_deref(), Some(gameflow::IN_PROGRESS) | Some(gameflow::GAME_START)) {
         let should_analyze = {
             let s = state.lock();
             !s.premade_ingame_done
         };
-        if should_analyze {
+        let ingame_enabled = config.lock().premade_ingame;
+        if should_analyze && ingame_enabled {
             state.lock().premade_ingame_done = true;
             let api2 = api.clone();
+            let overlay_tx2 = overlay_tx.clone();
             tokio::spawn(async move {
                 let session = match api2.get_gameflow_session().await {
                     Ok(s) => s,
@@ -199,6 +238,13 @@ pub async fn handle_gameflow(
                 let (my_result, their_result) = analyze_premade(&api2, my_team, their_team, 3, 20).await;
                 let msg = format_premade_message(&my_result, &their_result, my_side, their_side);
                 info!("{msg}");
+                // 推送到信息面板
+                let _ = overlay_tx2.send(OverlayCmd::UpdatePanel(PanelContent {
+                    connection: "已连接".to_owned(),
+                    phase: "游戏中".to_owned(),
+                    premade: msg.clone(),
+                    ..Default::default()
+                })).await;
                 match api2.send_message_to_self(&msg).await {
                     Ok(()) => info!("游戏中组黑分析已私信发送给自己"),
                     Err(e) => warn!("游戏中组黑分析私信发送失败: {e}"),
@@ -291,9 +337,15 @@ fn reset_pick_state_locked(s: &mut super::state::RuntimeState) {
 pub async fn handle_honor_ballot(
     api: LcuClient,
     state: SharedState,
+    config: SharedConfig,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     event: Value,
 ) {
+    // 配置：未开启自动跳过点赞则直接返回
+    if !config.lock().auto_honor_skip {
+        return;
+    }
+
     let data = event_data(&event);
     let game_id: Option<i64> = data
         .and_then(|d| d.get("gameId"))
@@ -424,6 +476,7 @@ async fn try_advance_post_honor_screen(
 pub async fn handle_champ_select(
     api: LcuClient,
     state: SharedState,
+    config: SharedConfig,
     overlay_tx: mpsc::Sender<OverlayCmd>,
     event: Value,
 ) {
@@ -441,10 +494,12 @@ pub async fn handle_champ_select(
         let s = state.lock();
         !s.premade_analysis_done
     };
-    if should_analyze {
+    let champ_select_enabled = config.lock().premade_champ_select;
+    if should_analyze && champ_select_enabled {
         state.lock().premade_analysis_done = true;
         let api2 = api.clone();
         let session2 = session.clone();
+        let overlay_tx2 = overlay_tx.clone();
         tokio::spawn(async move {
             let (my_team_raw, their_team_raw, my_side, their_side) = extract_teams_from_session(&session2);
             if my_team_raw.is_empty() && their_team_raw.is_empty() {
@@ -473,6 +528,13 @@ pub async fn handle_champ_select(
             let (my_result, their_result) = analyze_premade(&api2, my_team, their_team, 3, 20).await;
             let msg = format_premade_message(&my_result, &their_result, my_side, their_side);
             info!("{msg}");
+            // 推送到信息面板
+            let _ = overlay_tx2.send(OverlayCmd::UpdatePanel(PanelContent {
+                connection: "已连接".to_owned(),
+                phase: "选人阶段".to_owned(),
+                premade: msg.clone(),
+                ..Default::default()
+            })).await;
             match api2.send_message_to_self(&msg).await {
                 Ok(()) => info!("选人阶段组黑分析已私信发送给自己"),
                 Err(e) => warn!("选人阶段组黑分析私信发送失败: {e}"),

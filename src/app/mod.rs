@@ -5,3 +5,4 @@ pub mod handlers;
 pub mod state;
 pub mod premade;
 pub mod loot;
+pub mod config;
