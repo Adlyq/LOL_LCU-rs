@@ -241,20 +241,42 @@ async fn run_once(
         }
     )).await;
 
+    // 触发初始阶段处理（例如启动时已在游戏中或选人中，需加载组队分析）
+    {
+        let api_c = api.clone();
+        let state_c = state.clone();
+        let config_c = config.clone();
+        let tx_c = overlay_tx.clone();
+        let phase_c = phase.clone();
+        tokio::spawn(async move {
+            // 处理 Gameflow（含 InProgress 组黑）
+            let initial_event = serde_json::json!({ "data": phase_c });
+            handlers::handle_gameflow(api_c.clone(), state_c.clone(), config_c.clone(), tx_c.clone(), initial_event).await;
+
+            // 如果当前在选人阶段，额外触发 ChampSelect 处理以加载 Bench 和组黑
+            if phase_c == "ChampSelect" {
+                if let Ok(session) = api_c.get_champ_select_session().await {
+                    let cs_event = serde_json::json!({ "data": session });
+                    handlers::handle_champ_select(api_c, state_c, config_c, tx_c, cs_event).await;
+                }
+            }
+        });
+    }
+
     info!("已开始监听，Ctrl+C 退出");
 
     // 启动窗口修复后台任务
     let fix_api = api.clone();
     let fix_tx = overlay_tx.clone();
     let window_fix_task = tokio::spawn(async move {
-        handlers::window_fix_loop(fix_api, fix_tx).await;
+        app::tasks::window_fix_loop(fix_api, fix_tx).await;
     });
 
-    // 启动内存监控后台任务（功能 10：LeagueClientUx 内存超限自动热重载）
+    // 启动内存监控后台任务
     let mem_api = api.clone();
     let mem_cfg = config.clone();
     let mem_monitor_task = tokio::spawn(async move {
-        memory_monitor_loop(mem_api, mem_cfg).await;
+        app::tasks::memory_monitor_loop(mem_api, mem_cfg).await;
     });
 
     // 订阅 WebSocket 各事件频道
@@ -446,93 +468,6 @@ async fn main_loop(
             }
         }
     }
-}
-
-// ── 内存监控循环（功能 10）────────────────────────────────────────
-
-/// 每 5 分钟检查一次 `LeagueClientUx.exe` 内存占用；
-/// 超过阈值（1500 MB）且当前处于大厅/空闲阶段时，自动触发热重载。
-/// 热重载后进入 30 分钟冷却期，避免频繁重载。
-async fn memory_monitor_loop(api: lcu::api::LcuClient, config: app::config::SharedConfig) {
-    const CHECK_INTERVAL_SECS: u64 = 5 * 60;
-    const COOLDOWN_SECS: u64 = 30 * 60;
-
-    // 安全阶段：只在这些阶段才重载，不打断游戏/选人
-    const SAFE_PHASES: &[&str] = &["None", "Lobby", "Matchmaking", "EndOfGame", ""];
-
-    let mut last_reload: Option<std::time::Instant> = None;
-
-    loop {
-        sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
-
-        // 判断配置是否开启
-        let (enabled, threshold_mb) = {
-            let cfg = config.lock();
-            (cfg.memory_monitor, cfg.memory_threshold_mb)
-        };
-        if !enabled {
-            continue;
-        }
-
-        // 冷却期内跳过
-        if let Some(t) = last_reload {
-            if t.elapsed().as_secs() < COOLDOWN_SECS {
-                continue;
-            }
-        }
-
-        // 确认当前阶段安全
-        let phase = match api.get_gameflow_phase().await {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if !SAFE_PHASES.contains(&phase.as_str()) {
-            continue;
-        }
-
-        // 读取 LeagueClientUx.exe 内存
-        let mem_mb = get_lcu_ux_memory_mb();
-        if mem_mb == 0 {
-            continue; // 进程未找到
-        }
-
-        if mem_mb < threshold_mb {
-            tracing::debug!("LeagueClientUx 内存 {mem_mb} MB，正常");
-            continue;
-        }
-
-        warn!(
-            "LeagueClientUx 内存 {mem_mb} MB 超过阈値 {threshold_mb} MB，阶段={phase}，触发自动热重载..."
-        );
-        match api.reload_ux().await {
-            Ok(()) => {
-                info!("内存超限热重载已触发（{mem_mb} MB → 热重载）");
-                last_reload = Some(std::time::Instant::now());
-            }
-            Err(e) => {
-                warn!("内存超限热重载失败: {e}");
-            }
-        }
-    }
-}
-
-/// 读取 `LeagueClientUx.exe` 的当前内存占用（RSS，单位 MB）。
-/// 进程不存在时返回 0。
-fn get_lcu_ux_memory_mb() -> u64 {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        false,
-        ProcessRefreshKind::new().with_memory(),
-    );
-    for (_, process) in sys.processes() {
-        if process.name().to_string_lossy().to_lowercase() == "leagueclientux.exe" {
-            return process.memory() / 1_048_576;
-        }
-    }
-    0
 }
 
 // ── Release 控制台附加 ─────────────────────────────────────────────

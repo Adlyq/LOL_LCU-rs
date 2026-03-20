@@ -195,7 +195,7 @@ impl eframe::App for PanelApp {
         // 应用窗口透明度
         let desired_opacity = self.config.lock().opacity;
         if desired_opacity != self.current_opacity {
-            if apply_window_opacity(desired_opacity) {
+            if crate::win::winapi::set_window_opacity_by_title("LOL-LCU 助手", desired_opacity) {
                 self.current_opacity = desired_opacity;
             }
         }
@@ -433,31 +433,6 @@ impl PanelApp {
         if *cfg != old {
             cfg.save();
         }
-    }
-}
-
-// ── 窗口透明度 ───────────────────────────────────────────────────
-
-/// 通过 Windows API 设置窗口整体透明度（30–100%）。
-/// 返回是否成功找到窗口并设置。
-fn apply_window_opacity(percent: u8) -> bool {
-    use windows::Win32::Foundation::*;
-    use windows::Win32::UI::WindowsAndMessaging::*;
-
-    unsafe {
-        let title: Vec<u16> = "LOL-LCU 助手\0".encode_utf16().collect();
-        let hwnd = match FindWindowW(
-            windows::core::PCWSTR::null(),
-            windows::core::PCWSTR(title.as_ptr()),
-        ) {
-            Ok(h) if !h.0.is_null() => h,
-            _ => return false,
-        };
-        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as i32);
-        let alpha = (percent.clamp(30, 100) as f32 / 100.0 * 255.0) as u8;
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
-        true
     }
 }
 

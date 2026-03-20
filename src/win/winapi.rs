@@ -11,7 +11,7 @@ use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, UpdateWindow,
 };
@@ -306,6 +306,37 @@ pub fn place_window_above_target(hwnd: HWND, target_hwnd: HWND, rect: &RECT) -> 
         };
 
         SetWindowPos(hwnd, insert_after, rect.left, rect.top, w, h, flags).is_ok()
+    }
+}
+
+/// 通过窗口标题查找并设置窗口整体透明度（30–100%）。
+/// 返回是否成功找到窗口并设置。
+pub fn set_window_opacity_by_title(title: &str, percent: u8) -> bool {
+    unsafe {
+        let title_wide = to_wide(title);
+        let hwnd = match FindWindowW(
+            PCWSTR::null(),
+            PCWSTR(title_wide.as_ptr()),
+        ) {
+            Ok(h) if !h.is_invalid() => h,
+            _ => return false,
+        };
+        set_window_opacity(hwnd, percent)
+    }
+}
+
+/// 设置指定窗口的透明度（30–100%）。
+pub fn set_window_opacity(hwnd: HWND, percent: u8) -> bool {
+    if hwnd.is_invalid() {
+        return false;
+    }
+    unsafe {
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        if SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as i32) == 0 {
+             // 检查错误？有些窗口可能不支持，但在 Windows 上通常 ok
+        }
+        let alpha = (percent.clamp(30, 100) as f32 / 100.0 * 255.0) as u8;
+        SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA).is_ok()
     }
 }
 

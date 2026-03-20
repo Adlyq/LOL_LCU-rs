@@ -2,6 +2,7 @@
 ///
 /// 对应 Python 侧 `app/game_handlers.py`。
 pub mod handlers;
+pub mod tasks;
 pub mod state;
 pub mod premade;
 pub mod loot;

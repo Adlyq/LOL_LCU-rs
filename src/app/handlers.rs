@@ -34,7 +34,6 @@ use super::state::SharedState;
 const READY_CHECK_ACCEPT_DELAY_SECS: u64 = 5;
 const HONOR_SKIP_FALLBACK_COOLDOWN_SECS: u64 = 30;
 const POSTGAME_CONTINUE_DELAY_SECS: f64 = 0.8;
-const WINDOW_FIX_POLL_SECS: f64 = 1.5;
 
 // ── 工具函数 ──────────────────────────────────────────────────────
 
@@ -235,7 +234,7 @@ pub async fn handle_gameflow(
                     "开始游戏中组黑分析（我方 {} {}人 / 对方 {} {}人）...",
                     my_side_str, my_team.len(), their_side_str, their_team.len()
                 );
-                let (my_result, their_result) = analyze_premade(&api2, my_team, their_team, 3, 20).await;
+                let (my_result, their_result) = analyze_premade(&api2, my_team, their_team, 2, 20).await;
                 let msg = format_premade_message(&my_result, &their_result, my_side, their_side);
                 info!("{msg}");
                 // 推送到信息面板
@@ -729,20 +728,5 @@ async fn loop_pick_until_refresh(
             }
             return;
         }
-    }
-}
-
-// ── window_fix_loop ──────────────────────────────────────────────
-
-/// 周期性自动修复 LCU 窗口比例（对应 Python `_window_fix_loop`）。
-pub async fn window_fix_loop(api: LcuClient, overlay_tx: mpsc::Sender<OverlayCmd>) {
-    loop {
-        match api.get_riotclient_zoom_scale().await {
-            Ok(zoom) => {
-                let _ = overlay_tx.send(OverlayCmd::AutoFixWindow(zoom)).await;
-            }
-            Err(_) => {}
-        }
-        sleep(Duration::from_secs_f64(WINDOW_FIX_POLL_SECS)).await;
     }
 }

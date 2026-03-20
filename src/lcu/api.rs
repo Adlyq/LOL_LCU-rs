@@ -543,6 +543,10 @@ impl LcuClient {
         .await
     }
 
+    pub async fn get_game_by_id(&self, game_id: i64) -> Result<Value, LcuApiError> {
+        self.get_json(&format!("/lol-match-history/v1/games/{game_id}")).await
+    }
+
     // ── 任务 ────────────────────────────────────────────────────────
 
     /// 获取当前账号所有任务（含进行中、已完成等）。
