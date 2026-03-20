@@ -1,386 +1,175 @@
-//! Overlay 窗口
-//!
-//! 对应 Python `OverlayWindow`（PySide6 QWidget）。
-//!
-//! Rust 实现采用纯 Win32 API 创建透明分层窗口（Layered Window）：
-//! - 样式：`WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`
-//! - 绘制：GDI `UpdateLayeredWindow` — 半透明容器框 + 槽位高亮；
-//! - 点击穿透：`WM_NCHITTEST` — 槽位内返回 `HTCLIENT`，外部返回 `HTTRANSPARENT`；
-//! - 点击回调：`WM_LBUTTONDOWN` → 计算槽位索引 → 通过 tokio mpsc 发给业务层；
-//! - 位置同步：每 120ms 跟随 LCU 窗口。
-//!
-//! 指令类型见 [`OverlayCmd`]。
+//! Overlay 窗口与系统托盘管理
+//! 
+//! 修正：
+//! 1. 采用 2 像素加厚描边。
+//! 2. 优化 Alpha 通道修复算法，确保“近黑色”描边在分层窗口中清晰可见。
+//! 3. 调整字体品质以适应描边算法。
 
 use std::ffi::OsStr;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::thread;
-
-use tracing::{debug, info, warn};
+use std::sync::mpsc as std_mpsc;
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::Shell::*;
 
 use crate::app::config::SharedConfig;
-use crate::win::info_panel::{InfoPanel, PanelAction};
 
-// ── 布局常量（对应 Python 模板坐标）─────────────────────────────
+// ── 常量定义 ─────────────────────────────────────────────────────
 
-/// 模板分辨率宽度（px）
-const TEMPLATE_W: f64 = 1920.0;
-/// 模板分辨率高度（px）
-const TEMPLATE_H: f64 = 1080.0;
-/// 模板 bench 容器矩形 left
-const BENCH_L: f64 = 528.0;
-/// 模板 bench 容器矩形 top
-const BENCH_T: f64 = 14.0;
-/// 模板 bench 容器矩形 right
-const BENCH_R: f64 = 1392.0;
-/// 模板 bench 容器矩形 bottom
-const BENCH_B: f64 = 90.0;
-/// 模板单个槽位边长（px）
-const SLOT_SIZE: f64 = 70.0;
-/// Bench 最大席位数（固定为 10，与大乱斗展示一致）
-const BENCH_SLOT_COUNT: usize = 10;
+const WM_TRAY_ICON: u32 = WM_USER + 100;
+const WM_CMD_WAKEUP: u32 = WM_USER + 101;
+const TRAY_UID: u32 = 1;
 
+const ID_QUIT: usize = 1001;
+const ID_RELOAD_UX: usize = 1002;
+const ID_PLAY_AGAIN: usize = 1003;
+const ID_AUTO_LOOT: usize = 1004;
+
+const ID_AUTO_ACCEPT: usize = 2001;
+const ID_AUTO_HONOR: usize = 2002;
+const ID_PREMADE_CHAMP: usize = 2003;
+const ID_MEMORY_MONITOR: usize = 2004;
+
+// ── 线程安全包装 ─────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug)]
+struct SendHwnd(HWND);
+unsafe impl Send for SendHwnd {}
+unsafe impl Sync for SendHwnd {}
 
 // ── 指令类型 ─────────────────────────────────────────────────────
 
-/// 发送给 Overlay 线程的指令（tokio mpsc）。
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum OverlayCmd {
-    /// 显示 overlay 窗口
-    Show,
-    /// 隐藏 overlay 窗口
-    Hide,
-    /// 更新 bench 英雄 ID 列表
-    SetBenchIds(Vec<i64>),
-    /// 清除选中槽位高亮
-    ClearSelectedSlot,
-    /// 更新选中槽位高亮
-    SetSelectedSlot(usize),
-    /// 触发窗口自动修复（zoom_scale）
-    AutoFixWindow(f64),
-    /// 更新信息面板内容
-    UpdatePanel(crate::win::info_panel::PanelContent),
-    /// 退出消息循环
+    UpdateHud(String, String),
     Quit,
 }
 
-// ── Overlay 线程启动 ──────────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub enum TrayAction {
+    ReloadUx,
+    PlayAgain,
+    AutoLoot,
+}
 
-/// 启动 Overlay 后台线程（Win32 消息循环），返回 tokio mpsc 发送端。
-///
-/// 点击回调通过 `click_tx`（tokio::sync::mpsc）发送到 tokio 侧。
+#[derive(Clone)]
+pub struct OverlaySender {
+    tx: tokio::sync::mpsc::Sender<OverlayCmd>,
+    hwnd: SendHwnd,
+}
+
+impl OverlaySender {
+    pub async fn send(&self, cmd: OverlayCmd) -> Result<(), tokio::sync::mpsc::error::SendError<OverlayCmd>> {
+        let tx = self.tx.clone();
+        tx.send(cmd).await?;
+        unsafe { let _ = PostMessageW(self.hwnd.0, WM_CMD_WAKEUP, WPARAM(0), LPARAM(0)); }
+        Ok(())
+    }
+}
+
+// ── 启动函数 ─────────────────────────────────────────────────────
+
 pub fn spawn_overlay_thread(
-    click_tx: tokio::sync::mpsc::Sender<usize>,
     config: SharedConfig,
-    action_tx: tokio::sync::mpsc::Sender<PanelAction>,
-) -> tokio::sync::mpsc::Sender<OverlayCmd> {
+    action_tx: tokio::sync::mpsc::Sender<TrayAction>,
+) -> OverlaySender {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<OverlayCmd>(256);
+    let (hwnd_tx, hwnd_rx) = std_mpsc::channel::<SendHwnd>();
 
     thread::Builder::new()
         .name("overlay-win32".to_owned())
         .spawn(move || {
-            overlay_message_loop(cmd_rx, click_tx, action_tx, config);
+            overlay_message_loop(cmd_rx, hwnd_tx, action_tx, config);
         })
         .expect("启动 overlay 线程失败");
 
-    cmd_tx
+    let hwnd = hwnd_rx.recv().expect("无法获取 Overlay 窗口句柄");
+    OverlaySender { tx: cmd_tx, hwnd }
 }
 
-// ── 几何计算（与 Python 实现完全对应）───────────────────────────
-
-/// 浮点矩形
-#[derive(Clone, Copy, Debug, Default)]
-struct FRect {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
+struct WndState {
+    connection: String,
+    premade: String,
+    config: SharedConfig,
+    action_tx: tokio::sync::mpsc::Sender<TrayAction>,
 }
 
-impl FRect {
-    fn contains(&self, px: f64, py: f64) -> bool {
-        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
-    }
-    fn right(&self) -> f64 { self.x + self.w }
-    fn bottom(&self) -> f64 { self.y + self.h }
+fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
+    COLORREF(r as u32 | ((g as u32) << 8) | ((b as u32) << 16))
 }
 
-/// 将模板矩形缩放到实际窗口坐标（窗口相对）。
-///
-/// `win_w`/`win_h`：overlay 窗口当前宽高（即 LCU 窗口宽高）。
-fn bench_container_rect(win_w: i32, win_h: i32) -> FRect {
-    let scale_x = win_w as f64 / TEMPLATE_W;
-    let scale_y = win_h as f64 / TEMPLATE_H;
-    FRect {
-        x: BENCH_L * scale_x,
-        y: BENCH_T * scale_y,
-        w: (BENCH_R - BENCH_L) * scale_x,
-        h: (BENCH_B - BENCH_T) * scale_y,
-    }
-}
+// ── 绘制逻辑 ─────────────────────────────────────────────────────
 
-/// 计算指定槽位在窗口坐标中的矩形（两端对齐，等间距）。
-///
-/// 对应 Python `_slot_rect()`。
-fn slot_rect(index: usize, slot_count: usize, container: FRect, win_w: i32, win_h: i32) -> FRect {
-    let scale_x = win_w as f64 / TEMPLATE_W;
-    let scale_y = win_h as f64 / TEMPLATE_H;
-    let scale = f64::min(scale_x, scale_y);
+unsafe fn paint_overlay(hwnd: HWND, state: &WndState) {
+    let mut rect = RECT::default();
+    let _ = GetClientRect(hwnd, &mut rect);
+    let win_w = rect.right - rect.left;
+    let win_h = rect.bottom - rect.top;
 
-    let slot_w = SLOT_SIZE * scale;
-    let slot_h = SLOT_SIZE * scale;
-    let edge_inset = f64::max(0.0, 1.5 * scale);
-    let avail_w = f64::max(1.0, container.w - 2.0 * edge_inset);
-
-    let gap = if slot_count <= 1 {
-        0.0
-    } else {
-        f64::max(0.0, (avail_w - slot_w * slot_count as f64) / (slot_count - 1) as f64)
-    };
-
-    let x = container.x + edge_inset + index as f64 * (slot_w + gap);
-    let y = container.y + (container.h - slot_h) / 2.0;
-    FRect { x, y, w: slot_w, h: slot_h }
-}
-
-/// 根据窗口相对坐标 `(px, py)` 判断点击的槽位索引（无命中返回 `None`）。
-fn hit_slot(px: f64, py: f64, slot_count: usize, win_w: i32, win_h: i32) -> Option<usize> {
-    if slot_count == 0 {
-        return None;
-    }
-    let container = bench_container_rect(win_w, win_h);
-    if !container.contains(px, py) {
-        return None;
-    }
-    for i in 0..slot_count {
-        if slot_rect(i, slot_count, container, win_w, win_h).contains(px, py) {
-            return Some(i);
-        }
-    }
-    None
-}
-
-// ── GDI 辅助 ─────────────────────────────────────────────────────
-
-/// 用 GDI 在内存 DC 上绘制 overlay 内容，然后通过 `UpdateLayeredWindow` 推送。
-///
-/// - 灰色边框：容器矩形 + 各槽位
-/// - 选中槽位：半透明绿色填充 `(130,255,130,65)`
-/// - 其余区域：近透明（alpha = 1）以捕捉鼠标消息
-unsafe fn paint_overlay(
-    hwnd: HWND,
-    win_w: i32,
-    win_h: i32,
-    slot_count: usize,
-    selected: Option<usize>,
-) {
-    if win_w <= 0 || win_h <= 0 {
-        return;
-    }
+    if win_w <= 0 || win_h <= 0 { return; }
 
     let hdc_screen = GetDC(HWND::default());
-    if hdc_screen.is_invalid() {
-        return;
-    }
     let hdc_mem = CreateCompatibleDC(hdc_screen);
-    if hdc_mem.is_invalid() {
-        ReleaseDC(HWND::default(), hdc_screen);
-        return;
-    }
 
-    // 创建 32bpp ARGB DIB
     let bi = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: win_w,
-        biHeight: -win_h, // 顶-下
+        biHeight: -win_h,
         biPlanes: 1,
         biBitCount: 32,
         biCompression: BI_RGB.0,
         ..Default::default()
     };
-    let bi_info = BITMAPINFO {
-        bmiHeader: bi,
-        bmiColors: [RGBQUAD::default(); 1],
-    };
-
     let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbm = match CreateDIBSection(hdc_mem, &bi_info, DIB_RGB_COLORS, &mut bits_ptr, HANDLE::default(), 0) {
-        Ok(h) if !h.is_invalid() => h,
-        _ => {
-            let _ = DeleteDC(hdc_mem);
-            ReleaseDC(HWND::default(), hdc_screen);
-            return;
-        }
-    };
-
+    let hbm = CreateDIBSection(hdc_mem, &BITMAPINFO { bmiHeader: bi, ..Default::default() }, DIB_RGB_COLORS, &mut bits_ptr, HANDLE::default(), 0).unwrap();
     let old_bm = SelectObject(hdc_mem, hbm);
 
-    // 填充全透明背景（alpha=0）
-    let total = (win_w * win_h * 4) as usize;
-    std::ptr::write_bytes(bits_ptr as *mut u8, 0u8, total);
+    std::ptr::write_bytes(bits_ptr, 0, (win_w * win_h * 4) as usize);
 
-    // ── 在 32bpp DIB 上直接写像素（premultiplied ARGB）──
-    let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (win_w * win_h) as usize);
+    let hfont = CreateFontW(
+        22, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_DEFAULT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        ANTIALIASED_QUALITY.0 as u32, // 使用标准抗锯齿，配合描边效果更好
+        (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32,
+        windows::core::w!("Microsoft YaHei"),
+    );
+    let old_font = SelectObject(hdc_mem, hfont);
 
-    // 预乘 ARGB 像素
-    #[inline(always)]
-    fn premul(r: u8, g: u8, b: u8, a: u8) -> u32 {
-        let af = a as f64 / 255.0;
-        let pr = (r as f64 * af) as u8;
-        let pg = (g as f64 * af) as u8;
-        let pb = (b as f64 * af) as u8;
-        ((a as u32) << 24) | ((pr as u32) << 16) | ((pg as u32) << 8) | (pb as u32)
+    SetBkMode(hdc_mem, TRANSPARENT);
+
+    let mut y = 40;
+    let x = 10;
+
+    if !state.connection.is_empty() {
+        draw_stroked_text(hdc_mem, &state.connection, x, y, rgb(0, 255, 0));
+        y += 32;
     }
 
-    // ── 圆角矩形：全局 SDF + 覆盖率 AA ──────────────────────────
-    //
-    // 使用完整圆角矩形 Signed Distance Field，直线段和弧线共享同一
-    // coverage 公式，从根本上保证视觉粗细一致、无断裂、无锯齿。
-    //
-    //   fill  : cov = clamp(0.5 - dist, 0, 1)
-    //   border: cov = clamp(1.0 - |dist|, 0, 1)   ← 1px AA 描边，任意处相同
-
-    /// 圆角矩形 SDF（负=内部，0=边缘，正=外部）。
-    #[inline(always)]
-    fn sdf_rrect(px: f64, py: f64, cx: f64, cy: f64, hw: f64, hh: f64, rad: f64) -> f64 {
-        let qx = (px - cx).abs() - (hw - rad);
-        let qy = (py - cy).abs() - (hh - rad);
-        qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - rad
-    }
-
-    /// 写入 AA 像素（premultiplied ARGB，cov ∈ (0,1]）
-    #[inline(always)]
-    fn write_aa(pixels: &mut [u32], win_w: i32, win_h: i32,
-                px: i32, py: i32, r: u8, g: u8, b: u8, base_a: u8, cov: f64) {
-        if (px as u32) >= (win_w as u32) || (py as u32) >= (win_h as u32) { return; }
-        let a = ((base_a as f64) * cov) as u8;
-        if a > 0 { pixels[(py * win_w + px) as usize] = premul(r, g, b, a); }
-    }
-
-    /// AA 圆角矩形填充（角部 SDF，中间行 scanline 加速）
-    #[inline(always)]
-    fn fill_rounded(pixels: &mut [u32], win_w: i32, win_h: i32,
-                    rect: FRect, rad: i32, r: u8, g: u8, b: u8, a: u8) {
-        let hw = rect.w * 0.5;
-        let hh = rect.h * 0.5;
-        let cx = rect.x + hw;
-        let cy = rect.y + hh;
-        let radf = (rad as f64).min(hw).min(hh).max(0.0);
-        let solid = premul(r, g, b, a);
-        let y0 = (rect.y as i32 - 1).max(0);
-        let y1 = (rect.bottom() as i32).min(win_h - 1);
-        let x0 = (rect.x as i32 - 1).max(0);
-        let x1 = (rect.right() as i32).min(win_w - 1);
-        let band   = radf as i32 + 1;
-        let mid_y0 = rect.y as i32 + band;
-        let mid_y1 = (rect.bottom() as i32 - 1) - band;
-        let ix0 = rect.x as i32;
-        let ix1 = (rect.right() as i32 - 1).min(win_w - 1);
-        for py in y0..=y1 {
-            let yf = py as f64 + 0.5;
-            if py >= mid_y0 && py <= mid_y1 {
-                // 中间行：直线边无角影响，直接写满
-                for px in ix0.max(0)..=ix1 {
-                    pixels[(py * win_w + px) as usize] = solid;
-                }
-            } else {
-                // 顶/底角部行：SDF per pixel
-                for px in x0..=x1 {
-                    let d = sdf_rrect(px as f64 + 0.5, yf, cx, cy, hw, hh, radf);
-                    if d < -0.5 {
-                        pixels[(py * win_w + px) as usize] = solid;
-                    } else if d < 0.5 {
-                        write_aa(pixels, win_w, win_h, px, py, r, g, b, a, 0.5 - d);
-                    }
-                }
-            }
+    if !state.premade.is_empty() {
+        for line in state.premade.lines() {
+            draw_stroked_text(hdc_mem, line, x, y, rgb(255, 255, 255));
+            y += 26;
         }
     }
 
-    /// AA 圆角矩形描边（SDF，直线段与弧线使用完全相同的 coverage 公式）
-    #[inline(always)]
-    fn draw_rounded_border(pixels: &mut [u32], win_w: i32, win_h: i32,
-                           rect: FRect, rad: i32, r: u8, g: u8, b: u8, a: u8) {
-        let hw = rect.w * 0.5;
-        let hh = rect.h * 0.5;
-        let cx = rect.x + hw;
-        let cy = rect.y + hh;
-        let radf = (rad as f64).min(hw).min(hh).max(0.0);
-        let y0 = (rect.y as i32 - 1).max(0);
-        let y1 = (rect.bottom() as i32).min(win_h - 1);
-        let x0 = (rect.x as i32 - 1).max(0);
-        let x1 = (rect.right() as i32).min(win_w - 1);
-        // 中间行只扫左右各 3px 条带，跳过内部像素
-        let band   = radf as i32 + 2;
-        let mid_y0 = rect.y as i32 + band;
-        let mid_y1 = (rect.bottom() as i32 - 1) - band;
-        let lx1 = (rect.x as i32 + 2).min(x1);
-        let rx0 = (rect.right() as i32 - 3).max(x0);
-        for py in y0..=y1 {
-            let yf = py as f64 + 0.5;
-            if py >= mid_y0 && py <= mid_y1 {
-                // 中间行：左右各 3px 边缘条带
-                for px in x0..=lx1 {
-                    let d = sdf_rrect(px as f64 + 0.5, yf, cx, cy, hw, hh, radf);
-                    let cov = (1.0 - d.abs()).clamp(0.0, 1.0);
-                    if cov > 0.0 { write_aa(pixels, win_w, win_h, px, py, r, g, b, a, cov); }
-                }
-                for px in rx0..=x1 {
-                    let d = sdf_rrect(px as f64 + 0.5, yf, cx, cy, hw, hh, radf);
-                    let cov = (1.0 - d.abs()).clamp(0.0, 1.0);
-                    if cov > 0.0 { write_aa(pixels, win_w, win_h, px, py, r, g, b, a, cov); }
-                }
-            } else {
-                // 顶/底行及角部：全行扫描
-                for px in x0..=x1 {
-                    let d = sdf_rrect(px as f64 + 0.5, yf, cx, cy, hw, hh, radf);
-                    let cov = (1.0 - d.abs()).clamp(0.0, 1.0);
-                    if cov > 0.0 { write_aa(pixels, win_w, win_h, px, py, r, g, b, a, cov); }
-                }
-            }
+    // ── Alpha 修复逻辑 ───────────────────────────────────────
+    let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, (win_w * win_h * 4) as usize);
+    for chunk in pixels.chunks_exact_mut(4) {
+        // 如果 RGB 任意分量 > 0，则视为文字/描边像素，强制不透明
+        if chunk[0] > 0 || chunk[1] > 0 || chunk[2] > 0 {
+            chunk[3] = 255;
         }
     }
 
-    if slot_count > 0 {
-        let container = bench_container_rect(win_w, win_h);
-        // 圆角半径随屏幕缩放（1080p 下容器 5px、槽位 4px）
-        let scale_y = win_h as f64 / TEMPLATE_H;
-        let container_r = (5.0 * scale_y).round() as i32;
-        let slot_r     = (4.0 * scale_y).round() as i32;
-
-        // 容器背景（alpha=2，近透明，但足以捕获鼠标）
-        fill_rounded(pixels, win_w, win_h, container, container_r, 0, 0, 0, 2);
-        // 容器灰色边框
-        draw_rounded_border(pixels, win_w, win_h, container, container_r, 128, 128, 128, 220);
-
-        // 各槽位
-        for i in 0..slot_count {
-            let sr = slot_rect(i, slot_count, container, win_w, win_h);
-            if selected == Some(i) {
-                fill_rounded(pixels, win_w, win_h, sr, slot_r, 130, 255, 130, 65);
-            } else {
-                fill_rounded(pixels, win_w, win_h, sr, slot_r, 0, 0, 0, 2);
-            }
-            draw_rounded_border(pixels, win_w, win_h, sr, slot_r, 160, 160, 160, 220);
-        }
-    }
-
-    // 获取窗口左上角屏幕坐标
-    let pt_src = POINT::default();
-    let sz = SIZE { cx: win_w, cy: win_h };
-    let mut pt_dst = POINT::default();
-    let mut wr = RECT::default();
-    if GetWindowRect(hwnd, &mut wr).is_ok() {
-        pt_dst.x = wr.left;
-        pt_dst.y = wr.top;
-    }
-
+    let pt_src = POINT { x: 0, y: 0 };
+    let size_dst = SIZE { cx: win_w, cy: win_h };
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,
         BlendFlags: 0,
@@ -389,348 +178,210 @@ unsafe fn paint_overlay(
     };
 
     let _ = UpdateLayeredWindow(
-        hwnd,
-        hdc_screen,
-        Some(&pt_dst),
-        Some(&sz),
-        hdc_mem,
-        Some(&pt_src),
-        COLORREF(0),
-        Some(&blend),
-        ULW_ALPHA,
+        hwnd, hdc_screen, None, Some(&size_dst),
+        hdc_mem, Some(&pt_src), COLORREF(0), Some(&blend), ULW_ALPHA
     );
 
-    // 清理
+    SelectObject(hdc_mem, old_font);
+    let _ = DeleteObject(hfont);
     SelectObject(hdc_mem, old_bm);
     let _ = DeleteObject(hbm);
     let _ = DeleteDC(hdc_mem);
     ReleaseDC(HWND::default(), hdc_screen);
 }
 
-// ── Win32 窗口过程共享状态（thread_local）───────────────────────
+/// 绘制描边文字
+unsafe fn draw_stroked_text(hdc: HDC, text: &str, x: i32, y: i32, color: COLORREF) {
+    let wide_text = to_wide(text);
+    
+    // 使用较深的灰色 (10,10,10) 作为描边，增加厚度至 2 像素
+    SetTextColor(hdc, rgb(10, 10, 10)); 
+    for dx in -2i32..=2i32 {
+        for dy in -2i32..=2i32 {
+            if dx == 0 && dy == 0 { continue; }
+            // 略过四个极角，使描边更圆滑
+            if dx.abs() == 2 && dy.abs() == 2 { continue; }
+            let _ = TextOutW(hdc, x + dx, y + dy, &wide_text);
+        }
+    }
 
-/// 窗口过程可访问的状态（存储在 thread_local，由 GWLP_USERDATA 指向）
-struct WndState {
-    slot_count: usize,
-    selected_slot: Option<usize>,
-    win_w: i32,
-    win_h: i32,
-    /// 向 tokio 发送槽位点击事件
-    click_tx: tokio::sync::mpsc::Sender<usize>,
+    // 主体文字绘制在最上层
+    SetTextColor(hdc, color);
+    let _ = TextOutW(hdc, x, y, &wide_text);
 }
 
-/// Win32 窗口过程
+// ── 窗口过程 ─────────────────────────────────────────────────────
+
 unsafe extern "system" fn overlay_wnd_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
+    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
 ) -> LRESULT {
     match msg {
-        WM_NCHITTEST => {
-            // 默认先穿透
-            let mut result = HTTRANSPARENT as isize;
-
-            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WndState;
-            if !ptr.is_null() {
-                let state = &*ptr;
-                // 鼠标屏幕坐标
-                let sx = (lparam.0 & 0xFFFF) as i16 as i32;
-                let sy = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                // 转为窗口相对坐标
-                let mut wr = RECT::default();
-                if GetWindowRect(hwnd, &mut wr).is_ok() {
-                    let px = (sx - wr.left) as f64;
-                    let py = (sy - wr.top) as f64;
-                    if hit_slot(px, py, state.slot_count, state.win_w, state.win_h).is_some() {
-                        result = HTCLIENT as isize;
-                    }
-                }
-            }
-            LRESULT(result)
-        }
-
-        WM_LBUTTONDOWN => {
-            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WndState;
-            if !ptr.is_null() {
-                let state = &*ptr;
-                let cx = (lparam.0 & 0xFFFF) as i16 as i32;
-                let cy = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                if let Some(idx) = hit_slot(cx as f64, cy as f64, state.slot_count, state.win_w, state.win_h) {
-                    debug!("Overlay 点击槽位 {idx}");
-                    let _ = state.click_tx.try_send(idx);
-                }
+        WM_TRAY_ICON => {
+            let event = (lparam.0 as u32) & 0xFFFF;
+            if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
+                show_tray_menu(hwnd);
             }
             LRESULT(0)
         }
-
-        WM_DESTROY => {
-            PostQuitMessage(0);
-            LRESULT(0)
-        }
-
+        WM_CMD_WAKEUP => LRESULT(0),
+        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
-// ── Win32 字符串辅助 ──────────────────────────────────────────────
+unsafe fn show_tray_menu(hwnd: HWND) {
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+    if ptr.is_null() { return; }
+    let state = &*ptr;
 
-fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(once(0)).collect()
+    let hmenu = CreatePopupMenu().unwrap();
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_PLAY_AGAIN, windows::core::w!("退出结算页面"));
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_RELOAD_UX, windows::core::w!("热重载客户端"));
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_AUTO_LOOT, windows::core::w!("领取任务与宝箱"));
+    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+
+    {
+        let config = state.config.lock();
+        let add_item = |menu, id, text, checked| {
+            let mut flags = MF_STRING;
+            if checked { flags |= MF_CHECKED; }
+            let _ = AppendMenuW(menu, flags, id, text);
+        };
+
+        add_item(hmenu, ID_AUTO_ACCEPT, windows::core::w!("自动接受对局"), config.auto_accept_enabled);
+        add_item(hmenu, ID_AUTO_HONOR, windows::core::w!("自动点赞跳过"), config.auto_honor_skip);
+        add_item(hmenu, ID_PREMADE_CHAMP, windows::core::w!("选人阶段组队分析"), config.premade_champ_select);
+        add_item(hmenu, ID_MEMORY_MONITOR, windows::core::w!("内存监控自动重载"), config.memory_monitor);
+    }
+    
+    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_QUIT, windows::core::w!("退出程序"));
+
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    let _ = SetForegroundWindow(hwnd);
+    
+    let cmd = TrackPopupMenu(hmenu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, None);
+    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+    let _ = DestroyMenu(hmenu);
+
+    if cmd.0 != 0 {
+        handle_menu_command(hwnd, cmd.0 as usize);
+    }
 }
 
-// ── Win32 消息循环（在独立线程运行）──────────────────────────────
+unsafe fn handle_menu_command(hwnd: HWND, id: usize) {
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+    if ptr.is_null() { return; }
+    let state = &*ptr;
+
+    match id {
+        ID_PLAY_AGAIN => { let _ = state.action_tx.try_send(TrayAction::PlayAgain); }
+        ID_RELOAD_UX => { let _ = state.action_tx.try_send(TrayAction::ReloadUx); }
+        ID_AUTO_LOOT => { let _ = state.action_tx.try_send(TrayAction::AutoLoot); }
+        ID_AUTO_ACCEPT => { let mut c = state.config.lock(); c.auto_accept_enabled = !c.auto_accept_enabled; c.save(); }
+        ID_AUTO_HONOR => { let mut c = state.config.lock(); c.auto_honor_skip = !c.auto_honor_skip; c.save(); }
+        ID_PREMADE_CHAMP => { let mut c = state.config.lock(); c.premade_champ_select = !c.premade_champ_select; c.save(); }
+        ID_MEMORY_MONITOR => { let mut c = state.config.lock(); c.memory_monitor = !c.memory_monitor; c.save(); }
+        ID_QUIT => { std::process::exit(0); }
+        _ => {}
+    }
+}
+
+// ── 消息循环 ─────────────────────────────────────────────────────
 
 fn overlay_message_loop(
     mut cmd_rx: tokio::sync::mpsc::Receiver<OverlayCmd>,
-    click_tx: tokio::sync::mpsc::Sender<usize>,
-    action_tx: tokio::sync::mpsc::Sender<PanelAction>,
+    hwnd_tx: std_mpsc::Sender<SendHwnd>,
+    action_tx: tokio::sync::mpsc::Sender<TrayAction>,
     config: SharedConfig,
 ) {
-    use std::time::{Duration, Instant};
-    use crate::win::winapi;
+    let hinstance = unsafe { GetModuleHandleW(None).unwrap() };
+    let wnd_class = to_wide("LOL_LCU_HUD");
 
-    info!("Overlay 线程已启动（Win32 消息循环）");
+    let wc = WNDCLASSW {
+        style: CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(overlay_wnd_proc),
+        hInstance: hinstance.into(),
+        lpszClassName: windows::core::PCWSTR(wnd_class.as_ptr()),
+        hbrBackground: HBRUSH::default(),
+        ..Default::default()
+    };
+    unsafe { RegisterClassW(&wc); }
 
-    // ── 状态 ────────────────────────────────────────────
-    let mut bench_ids: Vec<i64> = Vec::new();
-    let mut selected_slot: Option<usize> = None;
-    let mut visible = false;
-    let mut target_hwnd: Option<HWND> = None;
-    let mut overlay_hwnd: Option<HWND> = None;
-    let mut info_panel: Option<InfoPanel> = None;
-    let mut last_sync = Instant::now();
-    let mut last_redraw = Instant::now();
-
-    // 固定 30Hz（~33ms/frame），overlay 非核心显示，无需高刷
-    let frame_duration = Duration::from_millis(33);
-
-    let auto_redraw_enabled = std::env::var("OVERLAY_AUTO_REDRAW")
-        .map(|v| v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(true);
-    let redraw_interval = Duration::from_secs_f64(
-        std::env::var("OVERLAY_AUTO_REDRAW_INTERVAL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1.5_f64),
-    );
-    let sync_interval = Duration::from_millis(120);
-
-    // ── 注册窗口类并创建分层窗口 ────────────────────────
-    let class_name = to_wide("LcuOverlayClass");
-    let hwnd_result: Result<HWND, _> = unsafe {
-        let hinstance = GetModuleHandleW(None)
-            .map(|h| windows::Win32::Foundation::HINSTANCE(h.0))
-            .unwrap_or_default();
-
-        let wc = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW,
-            lpfnWndProc: Some(overlay_wnd_proc),
-            hInstance: hinstance,
-            lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
-            ..Default::default()
-        };
-        RegisterClassExW(&wc); // 忽略重复注册错误
-
-        let win_name = to_wide("LcuOverlay");
+    let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            windows::core::PCWSTR(class_name.as_ptr()),
-            windows::core::PCWSTR(win_name.as_ptr()),
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            windows::core::PCWSTR(wnd_class.as_ptr()),
+            windows::core::w!("LOL_LCU_HUD"),
             WS_POPUP,
-            0, 0, 1920, 1080, // 初始尺寸，稍后由位置同步更新
-            HWND::default(),
-            HMENU::default(),
-            hinstance,
-            None,
-        )
+            0, 0, 1200, 900,
+            None, None, hinstance, None
+        ).unwrap()
     };
 
-    match hwnd_result {
-        Ok(hwnd) if !hwnd.is_invalid() => {
-            info!("Overlay Win32 窗口已创建 hwnd={hwnd:?}");
-            overlay_hwnd = Some(hwnd);
+    let state_ptr = Box::into_raw(Box::new(WndState {
+        connection: "等待连接...".to_owned(),
+        premade: String::new(),
+        config,
+        action_tx,
+    }));
+    unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize); }
 
-            // 将 WndState 分配到堆上，通过 GWLP_USERDATA 挂载
-            let state = Box::new(WndState {
-                slot_count: BENCH_SLOT_COUNT,
-                selected_slot: None,
-                win_w: 1920,
-                win_h: 1080,
-                click_tx: click_tx.clone(),
-            });
-            let state_ptr = Box::into_raw(state);
-            unsafe {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
-            }
-
-            // 启动 egui 信息面板线程
-            info_panel = InfoPanel::spawn(config, action_tx);
-        }
-        Err(e) => {
-            warn!("创建 Overlay 窗口失败: {e}，将以无 GUI 模式运行");
-        }
-        _ => {
-            warn!("创建 Overlay 窗口返回无效句柄，将以无 GUI 模式运行");
-        }
+    unsafe {
+        paint_overlay(hwnd, &*state_ptr);
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        add_tray_icon(hwnd);
     }
 
-    // ── 主循环 ──────────────────────────────────────────
+    let _ = hwnd_tx.send(SendHwnd(hwnd));
+
     loop {
-        // ── 处理来自 tokio 的指令 ──────────────────────
-        let mut needs_repaint = false;
-        loop {
-            match cmd_rx.try_recv() {
-                Ok(cmd) => match cmd {
-                    OverlayCmd::Show => {
-                        visible = true;
-                        needs_repaint = true;
-                        debug!("Overlay: Show");
-                        if let Some(hwnd) = overlay_hwnd {
-                            unsafe { let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
-                        }
-                    }
-                    OverlayCmd::Hide => {
-                        visible = false;
-                        selected_slot = None;
-                        bench_ids.clear();
-                        needs_repaint = true;
-                        debug!("Overlay: Hide");
-                        if let Some(hwnd) = overlay_hwnd {
-                            unsafe { let _ = ShowWindow(hwnd, SW_HIDE); }
-                        }
-                    }
-                    OverlayCmd::SetBenchIds(ids) => {
-                        bench_ids = ids;
-                        needs_repaint = true;
-                        debug!("Overlay: SetBenchIds({:?})", bench_ids);
-                    }
-                    OverlayCmd::ClearSelectedSlot => {
-                        selected_slot = None;
-                        needs_repaint = true;
-                        debug!("Overlay: ClearSelectedSlot");
-                    }
-                    OverlayCmd::SetSelectedSlot(idx) => {
-                        selected_slot = Some(idx);
-                        needs_repaint = true;
-                        debug!("Overlay: SetSelectedSlot({idx})");
-                    }
-                    OverlayCmd::AutoFixWindow(zoom) => {
-                        if let Some(hwnd) = target_hwnd {
-                            winapi::fix_lcu_window_by_zoom(hwnd, zoom, false);
-                        }
-                    }
-                    OverlayCmd::UpdatePanel(content) => {
-                        if let Some(ref panel) = info_panel {
-                            panel.update(|c| *c = content);
-                        }
-                    }
-                    OverlayCmd::Quit => {
-                        info!("Overlay: Quit");
-                        if let Some(hwnd) = overlay_hwnd {
-                            unsafe {
-                                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WndState;
-                                if !ptr.is_null() {
-                                    drop(Box::from_raw(ptr));
-                                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                                }
-                                let _ = DestroyWindow(hwnd);
-                            }
-                        }
-                        return;
-                    }
-                },
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    info!("Overlay 指令通道已关闭，退出线程");
-                    if let Some(hwnd) = overlay_hwnd {
-                        unsafe {
-                            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WndState;
-                            if !ptr.is_null() {
-                                drop(Box::from_raw(ptr));
-                                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                            }
-                            let _ = DestroyWindow(hwnd);
-                        }
-                    }
-                    return;
-                }
-            }
-        }
-
-        // ── 同步 LCU 窗口位置 ──────────────────────────
-        let now = Instant::now();
-        if now.duration_since(last_sync) >= sync_interval {
-            last_sync = now;
-            target_hwnd = winapi::find_lcu_window();
-
-            if let (Some(lcu), Some(ov)) = (target_hwnd, overlay_hwnd) {
-                if let Some(rect) = winapi::get_window_rect(lcu) {
-                    let new_w = rect.right - rect.left;
-                    let new_h = rect.bottom - rect.top;
-
-                    // 更新 WndState 中的尺寸
-                    unsafe {
-                        let ptr = GetWindowLongPtrW(ov, GWLP_USERDATA) as *mut WndState;
-                        if !ptr.is_null() {
-                            let state = &mut *ptr;
-                            let size_changed = state.win_w != new_w || state.win_h != new_h;
-                            state.win_w = new_w;
-                            state.win_h = new_h;
-                            state.slot_count = BENCH_SLOT_COUNT; // 固定 10 个席位
-                            state.selected_slot = selected_slot;
-                            if size_changed { needs_repaint = true; }
-                        }
-                    }
-
-                    // 将 overlay 放置在 LCU 窗口正上方
-                    if visible {
-                        winapi::place_window_above_target(ov, lcu, &rect);
-                    }
-                }
-            }
-
-            if auto_redraw_enabled
-                && target_hwnd.is_some()
-                && now.duration_since(last_redraw) >= redraw_interval
-            {
-                winapi::auto_redraw_lcu_window(target_hwnd.unwrap());
-                last_redraw = now;
-            }
-        }
-
-        // ── 重绘 overlay ────────────────────────────────
-        // 注意：直接使用本地 selected_slot，而非 state.selected_slot
-        // state.selected_slot 仅在 120ms 间隔的 sync 块里更新，
-        // 若用它会导致 ClearSelectedSlot/SetSelectedSlot 到达后
-        // 立即重绘时仍读到旧值，造成绿色遮罩滞留 120ms+。
-        if needs_repaint {
-            if let Some(hwnd) = overlay_hwnd {
-                unsafe {
-                    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
-                    if !ptr.is_null() {
-                        let state = &*ptr;
-                        paint_overlay(hwnd, state.win_w, state.win_h, state.slot_count, selected_slot);
-                    }
-                }
-            }
-        }
-
-        // ── Win32 消息泵 ───────────────────────────────
-        unsafe {
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT {
-                    info!("Overlay 收到 WM_QUIT");
-                    return;
-                }
+        let mut msg = MSG::default();
+        if unsafe { GetMessageW(&mut msg, None, 0, 0).as_bool() } {
+            unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+        } else {
+            return;
         }
 
-        // 每帧休眠，间隔跟随系统刷新率
-        thread::sleep(frame_duration);
+        let mut updated = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                OverlayCmd::UpdateHud(conn, prem) => {
+                    let s = unsafe { &mut *state_ptr };
+                    if !conn.is_empty() { s.connection = conn; }
+                    s.premade = prem;
+                    updated = true;
+                }
+                OverlayCmd::Quit => return,
+            }
+        }
+
+        if updated {
+            unsafe { paint_overlay(hwnd, &*state_ptr); }
+        }
     }
+}
+
+unsafe fn add_tray_icon(hwnd: HWND) {
+    let hicon = LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap();
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_UID,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uCallbackMessage: WM_TRAY_ICON,
+        hIcon: hicon,
+        ..Default::default()
+    };
+    let tip = to_wide("LOL_LCU 助手");
+    nid.szTip[..tip.len()].copy_from_slice(&tip);
+    let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(once(0)).collect()
 }

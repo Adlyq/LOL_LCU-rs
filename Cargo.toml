@@ -50,10 +50,6 @@ windows = { version = "0.58", features = [
     "Win32_UI_HiDpi",
 ] }
 
-# GUI 信息面板（egui 渲染，glow/OpenGL 后端）
-eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
-winit = { version = "0.30", default-features = false }
-
 # Misc utilities
 anyhow = "1"
 thiserror = "1"

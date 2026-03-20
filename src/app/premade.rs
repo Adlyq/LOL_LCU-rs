@@ -6,11 +6,11 @@
 //! 3. 推断预组队：若两个玩家在历史战绩中多次（阈值默认为 3）出现在同一个 GameID 且胜负结果一致，则认为其是预组队。
 //! 4. 使用并查集 (UnionFind) 将相互关联的玩家合并为最终的分组。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::Value;
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::lcu::api::{LcuApiError, LcuClient};
 
@@ -196,7 +196,7 @@ fn calc_inferred_premade(
         // 查找属于该组的所有边，取最小值（由于并查集保证了连通性，这里简单处理）
         let mut min_times = 999;
         let mut found_edge = false;
-        for (i, j, c) in &edges {
+        for (i, _j, c) in &edges {
             if find(&mut parent, *i) == root {
                 min_times = min_times.min(*c);
                 found_edge = true;
