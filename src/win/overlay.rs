@@ -228,30 +228,38 @@ unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
     let hbm = CreateDIBSection(hdc_mem, &BITMAPINFO { bmiHeader: bi, ..Default::default() }, DIB_RGB_COLORS, &mut bits_ptr, HANDLE::default(), 0).unwrap();
     let old_bm = SelectObject(hdc_mem, hbm);
+    
+    // 初始化全透明
     std::ptr::write_bytes(bits_ptr, 0, (win_w * win_h * 4) as usize);
+    let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (win_w * win_h) as usize);
 
     if state.show_bench {
         let container = get_bench_container_rect(win_w, win_h);
         let scale_y = win_h as f64 / TEMPLATE_H;
+        
+        // 1. 填充容器背景 (Alpha=2, 近似透明但可捕获鼠标)
+        fill_rect_alpha(pixels, win_w, win_h, container, 0, 0, 0, 2);
+        
+        // 2. 绘制容器边框
         let pen_gray = CreatePen(PS_SOLID, 1, rgb(128, 128, 128));
         let old_pen = SelectObject(hdc_mem, pen_gray);
         let old_brush = SelectObject(hdc_mem, GetStockObject(NULL_BRUSH));
         let _ = round_rect(hdc_mem, container, (5.0 * scale_y) as i32);
+        
+        // 3. 绘制槽位
         let pen_slot = CreatePen(PS_SOLID, 1, rgb(160, 160, 160));
         SelectObject(hdc_mem, pen_slot);
         for i in 0..BENCH_SLOT_COUNT {
             let sr = get_slot_rect(i, BENCH_SLOT_COUNT, container, win_w, win_h);
+            // 槽位背景同样需要 Alpha=2 
+            fill_rect_alpha(pixels, win_w, win_h, sr, 0, 0, 0, 2);
             let _ = round_rect(hdc_mem, sr, (4.0 * scale_y) as i32);
         }
+        
         SelectObject(hdc_mem, old_pen);
         SelectObject(hdc_mem, old_brush);
         let _ = DeleteObject(pen_gray);
         let _ = DeleteObject(pen_slot);
-    }
-
-    let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, (win_w * win_h * 4) as usize);
-    for chunk in pixels.chunks_exact_mut(4) {
-        if chunk[0] > 0 || chunk[1] > 0 || chunk[2] > 0 { chunk[3] = 255; }
     }
 
     let pt_dst = POINT { x: rect.left, y: rect.top };
@@ -264,6 +272,26 @@ unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     let _ = DeleteObject(hbm);
     let _ = DeleteDC(hdc_mem);
     ReleaseDC(HWND::default(), hdc_screen);
+}
+
+/// 填充矩形区域的 Alpha 值（使用预乘颜色）。
+fn fill_rect_alpha(pixels: &mut [u32], win_w: i32, win_h: i32, rect: FRect, r: u8, g: u8, b: u8, a: u8) {
+    let x0 = rect.x.round() as i32;
+    let y0 = rect.y.round() as i32;
+    let x1 = (rect.x + rect.w).round() as i32;
+    let y1 = (rect.y + rect.h).round() as i32;
+    
+    let alpha_f = a as f32 / 255.0;
+    let pr = (r as f32 * alpha_f) as u32;
+    let pg = (g as f32 * alpha_f) as u32;
+    let pb = (b as f32 * alpha_f) as u32;
+    let color = (a as u32) << 24 | pr << 16 | pg << 8 | pb;
+
+    for y in y0.max(0)..y1.min(win_h) {
+        for x in x0.max(0)..x1.min(win_w) {
+            pixels[(y * win_w + x) as usize] = color;
+        }
+    }
 }
 
 unsafe fn round_rect(hdc: HDC, r: FRect, rad: i32) -> BOOL {
