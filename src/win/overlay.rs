@@ -70,6 +70,8 @@ impl FRect {
 pub enum OverlayCmd {
     UpdateHud(String, String),
     ShowBench(bool),          
+    SetSelectedSlot(usize),   
+    ClearSelectedSlot,        
     AutoFixWindow(f64),       
     Quit,
 }
@@ -105,6 +107,7 @@ struct WndState {
     click_tx: tokio::sync::mpsc::Sender<usize>,
     
     show_bench: bool,
+    selected_slot: Option<usize>,
     win_w: i32,
     win_h: i32,
 }
@@ -251,8 +254,12 @@ unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
         SelectObject(hdc_mem, pen_slot);
         for i in 0..BENCH_SLOT_COUNT {
             let sr = get_slot_rect(i, BENCH_SLOT_COUNT, container, win_w, win_h);
-            // 槽位背景同样需要 Alpha=2 
-            fill_rect_alpha(pixels, win_w, win_h, sr, 0, 0, 0, 2);
+            // 选中槽位填充绿色遮罩，否则填充 Alpha=2 以捕获鼠标
+            if state.selected_slot == Some(i) {
+                fill_rect_alpha(pixels, win_w, win_h, sr, 130, 255, 130, 65);
+            } else {
+                fill_rect_alpha(pixels, win_w, win_h, sr, 0, 0, 0, 2);
+            }
             let _ = round_rect(hdc_mem, sr, (4.0 * scale_y) as i32);
         }
         
@@ -469,7 +476,7 @@ fn overlay_message_loop(
 
     let state = Box::new(WndState {
         connection: "等待连接...".to_owned(), premade: String::new(), config, action_tx, click_tx,
-        show_bench: false, win_w: 1920, win_h: 1080,
+        show_bench: false, selected_slot: None, win_w: 1920, win_h: 1080,
     });
     let state_ptr = Box::into_raw(state);
     unsafe {
@@ -502,6 +509,12 @@ fn overlay_message_loop(
                 OverlayCmd::ShowBench(show) => { 
                     s.show_bench = show; needs_paint_bench = true;
                     unsafe { let _ = ShowWindow(bench_hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+                }
+                OverlayCmd::SetSelectedSlot(idx) => {
+                    s.selected_slot = Some(idx); needs_paint_bench = true;
+                }
+                OverlayCmd::ClearSelectedSlot => {
+                    s.selected_slot = None; needs_paint_bench = true;
                 }
                 OverlayCmd::AutoFixWindow(zoom) => {
                     if let Some(target) = winapi::find_lcu_window() {

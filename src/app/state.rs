@@ -25,6 +25,15 @@ pub struct RuntimeState {
     pub last_honor_skip_ts: Instant,
     /// 上一次点击点赞页面"继续"按钮的游戏 ID
     pub last_post_honor_continue_game_id: Option<i64>,
+
+    /// 当前板凳席英雄 ID 列表（用于点击索引匹配）
+    pub current_bench_ids: Vec<i64>,
+    /// 当前正在尝试抢英雄的槽位索引
+    pub active_pick_slot: Option<usize>,
+    /// 抢英雄任务代次（用于取消旧任务）
+    pub pick_generation: u64,
+    /// 抢英雄异步任务句柄
+    pub pick_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RuntimeState {
@@ -37,6 +46,10 @@ impl RuntimeState {
             last_skipped_honor_game_id: None,
             last_honor_skip_ts: Instant::now(),
             last_post_honor_continue_game_id: None,
+            current_bench_ids: Vec::new(),
+            active_pick_slot: None,
+            pick_generation: 0,
+            pick_task: None,
         }
     }
 
@@ -44,7 +57,12 @@ impl RuntimeState {
     pub fn reset_session(&mut self) {
         self.premade_analysis_done = false;
         self.premade_ingame_done = false;
-        // 点赞相关通常跟随进程，重连时不一定重置，但重置也安全
+        self.current_bench_ids.clear();
+        self.active_pick_slot = None;
+        self.pick_generation += 1;
+        if let Some(task) = self.pick_task.take() {
+            task.abort();
+        }
     }
 }
 

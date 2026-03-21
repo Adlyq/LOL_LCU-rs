@@ -146,13 +146,10 @@ async fn run_once(
             click = click_rx.recv() => {
                 if let Some(idx) = click {
                     let api_c = api.clone();
+                    let state_c = state.clone();
+                    let tx_c = overlay_tx.clone();
                     tokio::spawn(async move {
-                        if let Ok(session) = api_c.get_champ_select_session().await {
-                            let ids = LcuClient::extract_bench_champion_ids(&session);
-                            if let Some(&cid) = ids.get(idx) {
-                                let _ = api_c.swap_bench_champion(cid).await;
-                            }
-                        }
+                        handlers::handle_overlay_click(api_c, state_c, tx_c, idx).await;
                     });
                 }
             }
