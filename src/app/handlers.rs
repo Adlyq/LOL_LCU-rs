@@ -3,13 +3,14 @@
 use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{info, warn, error, debug};
 
 use crate::lcu::api::{gameflow, LcuClient};
 use crate::win::overlay::{OverlayCmd, OverlaySender};
 use crate::app::premade::{analyze_premade, extract_teams_from_session, extract_teams_from_gameflow_session, format_premade_message};
 use crate::app::config::SharedConfig;
 use super::state::SharedState;
+
 
 const POSTGAME_CONTINUE_DELAY_SECS: f64 = 0.8;
 
@@ -93,7 +94,11 @@ pub async fn handle_ready_check(
         if ev_id != c_id { state.lock().ready_check_pending_accept = false; return; }
     }
 
-    let _ = api.accept_ready_check().await;
+    if let Err(e) = api.accept_ready_check().await {
+        error!("自动接受 Ready Check 失败: {e}");
+    } else {
+        info!("Ready Check 已自动接受");
+    }
     state.lock().ready_check_pending_accept = false;
 }
 
@@ -108,18 +113,23 @@ pub async fn handle_gameflow(
 ) {
     let phase = event.get("data").and_then(|v| v.as_str()).unwrap_or(gameflow::NONE);
 
-    // 在非 release 模式下支持环境变量强制显示 Overlay
-    if is_overlay_forced() {
-        let _ = overlay_tx.send(OverlayCmd::ShowBench(true)).await;
+    // 1. 根据阶段设置可见性
+    if phase == gameflow::CHAMP_SELECT {
+        let _ = overlay_tx.send(OverlayCmd::Show).await;
+    } else if !is_overlay_forced() {
+        match phase {
+            gameflow::IN_PROGRESS | gameflow::GAME_START => {}, // 游戏中保持当前状态（可能是显示中）
+            _ => {
+                let _ = overlay_tx.send(OverlayCmd::Hide).await;
+            }
+        }
     }
 
+    // 2. 状态文字更新
     match phase {
         gameflow::CHAMP_SELECT | gameflow::IN_PROGRESS | gameflow::GAME_START => {}
         _ => {
             let _ = overlay_tx.send(OverlayCmd::UpdateHud(format!("状态: {phase}"), String::new())).await;
-            if !is_overlay_forced() {
-                let _ = overlay_tx.send(OverlayCmd::ShowBench(false)).await;
-            }
             let mut s = state.lock();
             s.premade_analysis_done = false;
             s.premade_ingame_done = false;

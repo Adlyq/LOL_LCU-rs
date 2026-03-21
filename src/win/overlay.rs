@@ -68,6 +68,8 @@ impl FRect {
 
 #[derive(Debug, Clone)]
 pub enum OverlayCmd {
+    Show,
+    Hide,
     UpdateHud(String, String),
     ShowBench(bool),          
     SetSelectedSlot(usize),   
@@ -490,6 +492,9 @@ fn overlay_message_loop(
     let _ = hwnd_tx.send(SendHwnd(hud_hwnd));
 
     let mut last_sync = Instant::now();
+    let mut last_rect = RECT::default();
+    let mut visible = true; // 默认显示
+    let mut target_hwnd: Option<HWND> = None;
     loop {
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
@@ -502,6 +507,22 @@ fn overlay_message_loop(
         while let Ok(cmd) = cmd_rx.try_recv() {
             let s = unsafe { &mut *state_ptr };
             match cmd {
+                OverlayCmd::Show => {
+                    visible = true;
+                    needs_paint_hud = true;
+                    needs_paint_bench = true;
+                    unsafe {
+                        let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE);
+                        if s.show_bench { let _ = ShowWindow(bench_hwnd, SW_SHOWNOACTIVATE); }
+                    }
+                }
+                OverlayCmd::Hide => {
+                    visible = false;
+                    unsafe {
+                        let _ = ShowWindow(hud_hwnd, SW_HIDE);
+                        let _ = ShowWindow(bench_hwnd, SW_HIDE);
+                    }
+                }
                 OverlayCmd::UpdateHud(conn, prem) => {
                     s.connection = conn;
                     s.premade = prem;
@@ -509,7 +530,7 @@ fn overlay_message_loop(
                 }
                 OverlayCmd::ShowBench(show) => { 
                     s.show_bench = show; needs_paint_bench = true;
-                    unsafe { let _ = ShowWindow(bench_hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+                    unsafe { let _ = ShowWindow(bench_hwnd, if show && visible { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
                 }
                 OverlayCmd::SetSelectedSlot(idx) => {
                     s.selected_slot = Some(idx); needs_paint_bench = true;
@@ -528,18 +549,24 @@ fn overlay_message_loop(
 
         if Instant::now().duration_since(last_sync) >= Duration::from_millis(150) {
             last_sync = Instant::now();
-            if let Some(target) = winapi::find_lcu_window() {
+            target_hwnd = winapi::find_lcu_window();
+            if let Some(target) = target_hwnd {
                 if let Some(r) = winapi::get_window_rect(target) {
                     let s = unsafe { &mut *state_ptr };
                     let nw = r.right - r.left; let nh = r.bottom - r.top;
-                    if nw != s.win_w || nh != s.win_h { 
+                    
+                    // Delta 检查：只有位置或尺寸变化才执行同步
+                    let pos_changed = r.left != last_rect.left || r.top != last_rect.top || nw != s.win_w || nh != s.win_h;
+                    
+                    if pos_changed {
                         s.win_w = nw; s.win_h = nh; 
+                        last_rect = r;
                         needs_paint_hud = true; 
                         needs_paint_bench = true;
-                    }
-                    // HUD 文字固定屏幕 (0,0)，不需要 place_window_above_target
-                    if s.show_bench {
-                        winapi::place_window_above_target(bench_hwnd, target, &r);
+                        
+                        if s.show_bench && visible {
+                            winapi::place_window_above_target(bench_hwnd, target, &r);
+                        }
                     }
                 }
             }
@@ -548,7 +575,9 @@ fn overlay_message_loop(
         if needs_paint_hud { unsafe { paint_hud(hud_hwnd, &*state_ptr); } }
         if needs_paint_bench { unsafe { paint_bench(bench_hwnd, &*state_ptr); } }
         
-        thread::sleep(Duration::from_millis(30));
+        // 动态频率：若找不到 LCU，降低轮询频率以节能
+        let sleep_ms = if target_hwnd.is_none() { 200 } else { 30 };
+        thread::sleep(Duration::from_millis(sleep_ms));
     }
 }
 

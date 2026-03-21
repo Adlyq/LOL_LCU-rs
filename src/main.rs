@@ -21,9 +21,59 @@ use crate::lcu::connection::{build_client, wait_for_credentials};
 use crate::lcu::websocket::spawn_ws_loop;
 use crate::win::overlay::{spawn_overlay_thread, OverlayCmd, OverlaySender, TrayAction};
 
+// ── 单实例守卫 ───────────────────────────────────────────────────
+
+fn ensure_single_instance() -> windows::Win32::Foundation::HANDLE {
+    use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::PCWSTR;
+
+    let name = to_wide("Global\\LOL_LCU_SingleInstance");
+    let handle = unsafe {
+        CreateMutexW(None, true, PCWSTR(name.as_ptr())).expect("CreateMutexW 失败")
+    };
+
+    if unsafe { windows::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS {
+        #[cfg(not(debug_assertions))]
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+            let text = to_wide("LOL_LCU 已在运行中，不允许重复启动。");
+            let caption = to_wide("LOL_LCU");
+            MessageBoxW(HWND::default(), PCWSTR(text.as_ptr()), PCWSTR(caption.as_ptr()), MB_OK | MB_ICONWARNING);
+        }
+        #[cfg(debug_assertions)]
+        eprintln!("[LOL_LCU] 已有实例在运行，退出。");
+        std::process::exit(1);
+    }
+    handle
+}
+
+#[cfg(not(debug_assertions))]
+fn try_attach_parent_console() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::System::Console::*;
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() { return; }
+        let _ = SetConsoleOutputCP(65001);
+        let _ = SetConsoleCP(65001);
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+            let h = HANDLE(f.into_raw_handle().cast());
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+        }
+    }
+}
+
+use crate::win::winapi::to_wide;
+
 #[tokio::main]
 async fn main() {
-    // 开启 DPI 感知，防止多显示器缩放导致 HUD 错位
+    let _single_instance = ensure_single_instance();
+
+    #[cfg(not(debug_assertions))]
+    try_attach_parent_console();
+
+    // 开启 DPI 感知
     unsafe {
         use windows::Win32::UI::HiDpi::*;
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -62,6 +112,9 @@ async fn run_with_reconnect(
         }
 
         state.lock().reset_session();
+        let _ = overlay_tx.send(OverlayCmd::Hide).await;
+        let _ = overlay_tx.send(OverlayCmd::ShowBench(false)).await;
+        
         sleep(Duration::from_secs(3)).await;
     }
 }
