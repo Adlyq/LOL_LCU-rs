@@ -25,6 +25,8 @@ pub struct RuntimeState {
     pub last_honor_skip_ts: Instant,
     /// 上一次点击点赞页面"继续"按钮的游戏 ID
     pub last_post_honor_continue_game_id: Option<i64>,
+    /// 英雄 ID -> 名称 映射表缓存
+    pub champion_id_name_map: std::collections::HashMap<i64, String>,
 }
 
 impl RuntimeState {
@@ -37,6 +39,7 @@ impl RuntimeState {
             last_skipped_honor_game_id: None,
             last_honor_skip_ts: Instant::now(),
             last_post_honor_continue_game_id: None,
+            champion_id_name_map: std::collections::HashMap::new(),
         }
     }
 

@@ -9,6 +9,17 @@ use tracing::{info, warn};
 
 use crate::lcu::api::LcuClient;
 use crate::app::config::SharedConfig;
+use crate::win::overlay::{OverlayCmd, OverlaySender};
+
+/// 窗口比例修复循环：定期检查 LCU 缩放并触发修复逻辑。
+pub async fn window_fix_loop(api: LcuClient, overlay_tx: OverlaySender) {
+    loop {
+        if let Ok(zoom) = api.get_riotclient_zoom_scale().await {
+            let _ = overlay_tx.send(OverlayCmd::AutoFixWindow(zoom)).await;
+        }
+        sleep(Duration::from_secs(2)).await;
+    }
+}
 
 /// 内存监控循环：当 LeagueClientUx.exe 内存超限时自动触发热重载。
 pub async fn memory_monitor_loop(api: LcuClient, config: SharedConfig) {

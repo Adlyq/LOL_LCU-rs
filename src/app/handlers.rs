@@ -18,6 +18,17 @@ fn event_data(event: &Value) -> Option<&Value> {
     if data.is_object() || data.is_string() { Some(data) } else { None }
 }
 
+fn is_overlay_forced() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var("LOL_LCU_SHOW_OVERLAY").is_ok()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
 // ── handle_ready_check ───────────────────────────────────────────
 
 pub async fn handle_ready_check(
@@ -97,10 +108,18 @@ pub async fn handle_gameflow(
 ) {
     let phase = event.get("data").and_then(|v| v.as_str()).unwrap_or(gameflow::NONE);
 
+    // 在非 release 模式下支持环境变量强制显示 Overlay
+    if is_overlay_forced() {
+        let _ = overlay_tx.send(OverlayCmd::ShowBench(true)).await;
+    }
+
     match phase {
         gameflow::CHAMP_SELECT | gameflow::IN_PROGRESS | gameflow::GAME_START => {}
         _ => {
             let _ = overlay_tx.send(OverlayCmd::UpdateHud(format!("状态: {phase}"), String::new())).await;
+            if !is_overlay_forced() {
+                let _ = overlay_tx.send(OverlayCmd::ShowBench(false)).await;
+            }
             let mut s = state.lock();
             s.premade_analysis_done = false;
             s.premade_ingame_done = false;
@@ -185,23 +204,107 @@ pub async fn handle_champ_select(
         None => return,
     };
 
+    // 1. 核心显示逻辑（极速触发表率）
+    let bench = session.get("benchChampions").and_then(|v| v.as_array());
+    let forced = is_overlay_forced();
+
+    if let Some(bench_arr) = bench {
+        let count = bench_arr.len();
+        // 立即发指令显示 HUD
+        let _ = overlay_tx.send(OverlayCmd::ShowBench(forced || count > 0)).await;
+
+        // 异步解析英雄名称，不阻塞显示
+        let api_c = api.clone();
+        let state_c = state.clone();
+        let tx_c = overlay_tx.clone();
+        let bench_arr_c = bench_arr.clone();
+
+        tokio::spawn(async move {
+            // 获取/更新缓存
+            let map = {
+                let cache = state_c.lock().champion_id_name_map.clone();
+                if cache.is_empty() {
+                    if let Ok(m) = api_c.get_champion_id_name_map().await {
+                        state_c.lock().champion_id_name_map = m.clone();
+                        m
+                    } else { cache }
+                } else { cache }
+            };
+
+            let mut names = Vec::new();
+            for hero in bench_arr_c {
+                if let Some(id) = hero.get("championId").and_then(|v| v.as_i64()) {
+                    names.push(map.get(&id).cloned().unwrap_or_else(|| format!("Hero-{id}")));
+                }
+            }
+            
+            if !names.is_empty() {
+                let msg = format!("板凳席: {}", names.join(" / "));
+                let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), msg)).await;
+            } else {
+                let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), String::new())).await;
+            }
+        });
+    } else {
+        let _ = overlay_tx.send(OverlayCmd::ShowBench(forced)).await;
+    }
+
+    // 2. 组队分析（完全异步处理）
     let should_analyze = {
         let s = state.lock();
         !s.premade_analysis_done
     };
     if should_analyze && config.lock().premade_champ_select {
         state.lock().premade_analysis_done = true;
-        let api2 = api.clone();
-        let tx2 = overlay_tx.clone();
+        let api_c = api.clone();
+        let tx_c = overlay_tx.clone();
         tokio::spawn(async move {
             let (my_raw, their_raw, my_side, their_side) = extract_teams_from_session(&session);
             let my_team = my_raw.into_iter().map(|(p, n, _)| (p, n)).collect();
             let their_team = their_raw.into_iter().map(|(p, n, _)| (p, n)).collect();
 
-            let (my_res, their_res) = analyze_premade(&api2, my_team, their_team, 3, 20).await;
+            let (my_res, their_res) = analyze_premade(&api_c, my_team, their_team, 3, 20).await;
             let msg = format_premade_message(&my_res, &their_res, my_side, their_side);
-            let _ = tx2.send(OverlayCmd::UpdateHud(String::new(), msg.clone())).await;
-            let _ = api2.send_message_to_self(&msg).await;
+            let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), msg.clone())).await;
+            let _ = api_c.send_message_to_self(&msg).await;
         });
+    }
+}
+
+// ── handle_lobby ─────────────────────────────────────────────────
+
+pub async fn handle_lobby(
+    _api: LcuClient,
+    _state: SharedState,
+    _config: SharedConfig,
+    overlay_tx: OverlaySender,
+    event: Value,
+) {
+    let data = match event_data(&event) {
+        Some(d) => d,
+        None => return,
+    };
+
+    if let Some(members) = data.get("members").and_then(|v| v.as_array()) {
+        let mut names = Vec::new();
+        for m in members {
+            // 尝试获取各种可能的昵称字段
+            let game_name = m.get("gameName").and_then(|v| v.as_str());
+            let tag_line = m.get("tagLine").and_then(|v| v.as_str());
+            let summoner_name = m.get("summonerName").and_then(|v| v.as_str());
+            
+            let name = if let (Some(gn), Some(tl)) = (game_name, tag_line) {
+                if gn.is_empty() { summoner_name.unwrap_or("未知").to_owned() }
+                else { format!("{}#{}", gn, tl) }
+            } else {
+                summoner_name.unwrap_or("未知").to_owned()
+            };
+            names.push(name);
+        }
+        
+        if !names.is_empty() {
+            let lobby_msg = format!("房间成员: {}", names.join(" / "));
+            let _ = overlay_tx.send(OverlayCmd::UpdateHud(lobby_msg, String::new())).await;
+        }
     }
 }

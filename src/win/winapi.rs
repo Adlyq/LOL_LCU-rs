@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 // ── 工具函数 ──────────────────────────────────────────────────────
 
-fn to_wide(s: &str) -> Vec<u16> {
+pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(once(0)).collect()
 }
 

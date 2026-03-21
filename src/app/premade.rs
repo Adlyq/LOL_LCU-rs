@@ -248,7 +248,23 @@ pub fn extract_teams_from_session(
             arr.iter().filter_map(|p| {
                 let puuid = p.get("puuid")?.as_str()?;
                 if puuid.is_empty() || puuid.starts_with('0') { return None; }
-                let name = p.get("summonerName").or(p.get("displayName")).and_then(|v| v.as_str()).unwrap_or(puuid).to_owned();
+                
+                // 优先级：gameName#tagLine > displayName > summonerName
+                let game_name = p.get("gameName").and_then(|v| v.as_str());
+                let tag_line = p.get("tagLine").and_then(|v| v.as_str());
+                let display_name = p.get("displayName").and_then(|v| v.as_str());
+                let summoner_name = p.get("summonerName").and_then(|v| v.as_str());
+
+                let name = if let (Some(gn), Some(tl)) = (game_name, tag_line) {
+                    if gn.is_empty() {
+                        display_name.or(summoner_name).unwrap_or(puuid).to_owned()
+                    } else {
+                        format!("{}#{}", gn, tl)
+                    }
+                } else {
+                    display_name.or(summoner_name).unwrap_or(puuid).to_owned()
+                };
+
                 let champ_id = p.get("championId").and_then(|v| v.as_i64()).filter(|&id| id != 0)
                     .or_else(|| p.get("championPickIntent").and_then(|v| v.as_i64())).unwrap_or(0);
                 Some((puuid.to_owned(), name, champ_id))
@@ -273,7 +289,21 @@ pub fn extract_teams_from_gameflow_session(
             arr.iter().filter_map(|p| {
                 let puuid = p.get("puuid")?.as_str()?;
                 if puuid.is_empty() || puuid.starts_with('0') { return None; }
-                let name = p.get("summonerName").or(p.get("gameName")).and_then(|v| v.as_str()).unwrap_or(puuid).to_owned();
+
+                let game_name = p.get("gameName").and_then(|v| v.as_str());
+                let tag_line = p.get("tagLine").and_then(|v| v.as_str());
+                let summoner_name = p.get("summonerName").and_then(|v| v.as_str());
+
+                let name = if let (Some(gn), Some(tl)) = (game_name, tag_line) {
+                    if gn.is_empty() {
+                        summoner_name.unwrap_or(puuid).to_owned()
+                    } else {
+                        format!("{}#{}", gn, tl)
+                    }
+                } else {
+                    summoner_name.unwrap_or(puuid).to_owned()
+                };
+
                 let champ_id = p.get("championId").and_then(|v| v.as_i64()).unwrap_or(0);
                 let label = if champ_id != 0 {
                     if let Some(cname) = id_name_map.get(&champ_id) { format!("{}({})", name, cname) } else { name }
