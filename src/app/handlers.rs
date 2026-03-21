@@ -147,6 +147,13 @@ pub async fn handle_gameflow(
                         let msg = format_premade_message(&my_res, &their_res, my_side, their_side);
                         let _ = tx2.send(OverlayCmd::UpdateHud(String::new(), msg.clone())).await;
                         let _ = api2.send_message_to_self(&msg).await;
+
+                        // 显示 2 分钟后自动隐藏
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                        let _ = tx2.send(OverlayCmd::UpdateHud(String::new(), String::new())).await;
+                        if !is_overlay_forced() {
+                            let _ = tx2.send(OverlayCmd::ShowBench(false)).await;
+                        }
                     }
                 }
             });
@@ -204,52 +211,12 @@ pub async fn handle_champ_select(
         None => return,
     };
 
-    // 1. 核心显示逻辑（极速触发表率）
-    let bench = session.get("benchChampions").and_then(|v| v.as_array());
+    // 1. 始终显示 HUD 背景 (尊重强制显示变量)
     let forced = is_overlay_forced();
+    let is_aram = session.get("benchEnabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let _ = overlay_tx.send(OverlayCmd::ShowBench(forced || is_aram)).await;
 
-    if let Some(bench_arr) = bench {
-        let count = bench_arr.len();
-        // 立即发指令显示 HUD
-        let _ = overlay_tx.send(OverlayCmd::ShowBench(forced || count > 0)).await;
-
-        // 异步解析英雄名称，不阻塞显示
-        let api_c = api.clone();
-        let state_c = state.clone();
-        let tx_c = overlay_tx.clone();
-        let bench_arr_c = bench_arr.clone();
-
-        tokio::spawn(async move {
-            // 获取/更新缓存
-            let map = {
-                let cache = state_c.lock().champion_id_name_map.clone();
-                if cache.is_empty() {
-                    if let Ok(m) = api_c.get_champion_id_name_map().await {
-                        state_c.lock().champion_id_name_map = m.clone();
-                        m
-                    } else { cache }
-                } else { cache }
-            };
-
-            let mut names = Vec::new();
-            for hero in bench_arr_c {
-                if let Some(id) = hero.get("championId").and_then(|v| v.as_i64()) {
-                    names.push(map.get(&id).cloned().unwrap_or_else(|| format!("Hero-{id}")));
-                }
-            }
-            
-            if !names.is_empty() {
-                let msg = format!("板凳席: {}", names.join(" / "));
-                let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), msg)).await;
-            } else {
-                let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), String::new())).await;
-            }
-        });
-    } else {
-        let _ = overlay_tx.send(OverlayCmd::ShowBench(forced)).await;
-    }
-
-    // 2. 组队分析（完全异步处理）
+    // 2. 组队分析并显示结果（不再显示板凳英雄列表）
     let should_analyze = {
         let s = state.lock();
         !s.premade_analysis_done
@@ -260,11 +227,14 @@ pub async fn handle_champ_select(
         let tx_c = overlay_tx.clone();
         tokio::spawn(async move {
             let (my_raw, their_raw, my_side, their_side) = extract_teams_from_session(&session);
-            let my_team = my_raw.into_iter().map(|(p, n, _)| (p, n)).collect();
-            let their_team = their_raw.into_iter().map(|(p, n, _)| (p, n)).collect();
+            // 这里 my_raw 已经包含 (puuid, nickname, champion_id)
+            let my_team = my_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
+            let their_team = their_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
 
             let (my_res, their_res) = analyze_premade(&api_c, my_team, their_team, 3, 20).await;
             let msg = format_premade_message(&my_res, &their_res, my_side, their_side);
+            
+            // 选人界面的主要内容是组黑分析结果（包含昵称）
             let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), msg.clone())).await;
             let _ = api_c.send_message_to_self(&msg).await;
         });
