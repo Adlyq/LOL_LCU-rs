@@ -150,7 +150,9 @@ pub async fn handle_gameflow(
 
                         // 显示 2 分钟后自动隐藏
                         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                        // 完全清空 HUD 文字
                         let _ = tx2.send(OverlayCmd::UpdateHud(String::new(), String::new())).await;
+                        // 如果不是强制显示，则关闭背景容器，达到“不显示任何东西”的效果
                         if !is_overlay_forced() {
                             let _ = tx2.send(OverlayCmd::ShowBench(false)).await;
                         }

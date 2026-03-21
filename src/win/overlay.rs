@@ -503,8 +503,9 @@ fn overlay_message_loop(
             let s = unsafe { &mut *state_ptr };
             match cmd {
                 OverlayCmd::UpdateHud(conn, prem) => {
-                    if !conn.is_empty() { s.connection = conn; }
-                    s.premade = prem; needs_paint_hud = true;
+                    s.connection = conn;
+                    s.premade = prem;
+                    needs_paint_hud = true;
                 }
                 OverlayCmd::ShowBench(show) => { 
                     s.show_bench = show; needs_paint_bench = true;
