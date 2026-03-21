@@ -69,6 +69,12 @@ fn ensure_single_instance() -> windows::Win32::Foundation::HANDLE {
 async fn main() {
     let _single_instance_mutex = ensure_single_instance();
 
+    // 开启 DPI 感知，防止多显示器缩放导致 HUD 错位
+    unsafe {
+        use windows::Win32::UI::HiDpi::*;
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+
     logging::init_logging(None);
     info!("LOL LCU 助手启动 (HUD + Tray 模式)");
 
