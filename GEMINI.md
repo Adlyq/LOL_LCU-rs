@@ -15,54 +15,53 @@
 ## 架构设计
 
 项目采用模块化设计：
-- `src/main.rs`: 程序入口，负责 DPI 感知设置及主重连循环。
+- `src/main.rs`: 程序入口，负责 DPI 感知、单实例守卫、主重连循环及**并发事件分发**。
 - `src/app/`: 核心业务逻辑。
-  - `handlers.rs`: 处理 LCU 事件（游戏流阶段、就绪检查、选人、点赞）。
+  - `handlers.rs`: 处理 LCU 事件（游戏流阶段、就绪检查、选人、组黑分析、抢人任务管理）。
   - `config.rs`: 持久化用户配置（存储于 `%APPDATA%\lol-lcu\config.json`）。
-  - `state.rs`: 内存中的会话状态管理。
-  - `tasks.rs`: 后台循环任务（如内存监控）。
-  - `premade.rs`: 组黑（Premade）分析逻辑。
+  - `state.rs`: 内存中的会话状态管理（包括抢人任务代次与异步句柄）。
+  - `tasks.rs`: 后台监控任务（内存监控、**窗口比例自动修复**）。
+  - `premade.rs`: 组黑（Premade）分析算法。
 - `src/lcu/`: LCU 客户端实现。
-  - `api.rs`: LCU REST API 接口封装。
+  - `api.rs`: LCU REST API 接口封装（含 Lobby、ChampSelect、Summoner 等）。
   - `connection.rs`: LCU 进程检测及从命令行参数提取凭据。
   - `websocket.rs`: WebSocket 事件监听与广播。
 - `src/win/`: Windows 特有 UI 组件。
-  - `overlay.rs`: 透明 Win32 覆盖层 (HUD) 与系统托盘集成。
-  - `winapi.rs`: 底层 Windows API 工具（如模拟点击、查找窗口）。
+  - `overlay.rs`: 透明 Win32 覆盖层 (HUD & Bench) 与系统托盘。
+  - `winapi.rs`: 底层 Windows API 工具（模拟点击、窗口定位、DPI 处理）。
 
-## 编译与运行 (WSL 环境特别说明)
+## 功能特性 (当前版本)
 
-由于本项目依赖 Windows 原生 API，**必须使用 Windows 侧的 Rust 工具链进行编译**。
-
-### 环境要求
-- **OS:** Windows 10/11。
-- **工具链:** `x86_64-pc-windows-msvc`。
-
-### 开发指令
-在 WSL 终端中，请通过 `.exe` 后缀调用 Windows 侧的 Cargo：
-- **运行：** `cargo.exe run`
-- **发布构建：** `cargo.exe build --release`
-  - 发布版本会启用 `#![windows_subsystem = "windows"]` 以隐藏控制台窗口。
-
-## 功能特性
-- **自动接受 (Auto-Accept):** 检测到对局时自动点击接受（延迟可配置）。
-- **自动点赞跳过 (Auto-Honor Skip):** 自动跳过点赞阶段，加速进入结算界面。
-- **组黑分析 (Premade Analysis):** 在选人及游戏过程中分析并识别预组队玩家，结果显示在 HUD 上。
-- **内存监控 (Memory Monitor):** 若 `LeagueClientUx` 内存占用过高（默认 1500MB），自动触发重载。
-- **HUD 覆盖层:** 在客户端上方实时显示状态信息（如 ARAM 板凳席英雄）。
+- **自动接受 (Auto-Accept):** 检测到对局时自动点击接受（支持可配置延迟）。
+- **极速响应 HUD:**
+    - 使用并发分发模型，确保 WebSocket 事件处理不阻塞主循环。
+    - 选人阶段**不再显示板凳席列表**，专注显示**组黑分析结果**（含召唤师昵称）。
+    - 游戏内分析结果在显示 **2 分钟后完全隐藏**（清空文字并关闭背景）。
+- **抢英雄增强:**
+    - **交互修复：** 解决了鼠标穿透问题，板凳席槽位支持精确点击。
+    - **视觉反馈：** 点击槽位后覆盖**绿色半透明遮罩**，任务进行中持续显示。
+    - **循环抢人：** 后台高频尝试交换英雄，支持再次点击手动取消，且在**成功抢到或英雄消失后自动去除绿色遮罩**并清理任务状态。
+- **自动窗口修复:** 后台监控 LCU 窗口，若比例不符或缩放变化，自动执行比例拉伸修复。
+- **智能启动同步:** 程序启动时主动通过 REST API 获取当前游戏阶段、房间、选人 session，实现即时衔接。
+- **内存监控:** 若 `LeagueClientUx` 内存占用过高，自动触发 UI 重载。
 
 ## 开发规范
 - **错误处理：** 应用层使用 `anyhow::Result`，库/模块层使用 `thiserror`。
-- **并发管理：** 配置与状态使用 `Arc<Mutex<T>>` (基于 `parking_lot`) 确保线程安全。
-- **WSL 互操作：** 在 WSL 中操作源码时，注意不要使用 Linux 原生 `cargo` 编译，否则会因缺少 Windows 标头文件而失败。
+- **并发管理：** 事件分发使用 `tokio::spawn` 异步派发；状态同步基于 `parking_lot::Mutex`。
+- **WSL 互操作：** Windows 侧 Rust 工具链编译，通过 HTTP 桥接执行原生指令。
 
 ## 更新日志 (Session Logs)
 
 ### 2026-03-21
-- **初始化环境：** 配置 WSL 访问 Windows 的 HTTP 桥接 (172.18.160.1:8080) 以执行原生命令。
-- **项目审计：** 确认项目结构、技术栈及编译流程。
-- **编译修复：** 修正 `src/win/overlay.rs` 中 `TextOutW` 因 `windows` crate 版本升级导致的签名不匹配错误。
-- **代码重构：** 
-    - 统一 `to_wide` 工具函数，并将其设为 `pub(crate)` 位于 `src/win/winapi.rs`。
-    - 清理 `src/win/overlay.rs` 中的冗余定义及未使用的 `std` 引用。
-- **健康检查：** 确认项目在 Windows 工具链下通过 `cargo check`，WebSocket 与事件处理逻辑审计完毕。
+- **环境适配：** 配置 WSL 与 Windows 桥接环境，解决 `TextOutW` 签名不匹配导致的编译错误。
+- **性能重构：** 将 WebSocket 事件处理从顺序 `await` 升级为 `tokio::spawn` 并发分发，HUD 响应达到毫秒级。
+- **功能补全：**
+    - 恢复并优化了 LCU 窗口比例自动修复功能。
+    - 增加了启动时主动获取 LCU 当前状态的逻辑。
+- **交互优化：** 
+    - 实现了透明窗口的鼠标事件捕获（Alpha=2 技巧），恢复抢英雄槽位点击功能。
+    - 实现了抢英雄任务的视觉反馈（绿色遮罩）与代次管理逻辑。
+- **视觉定制：**
+    - 选人阶段改为仅显示组黑信息（昵称），移除冗余板凳席英雄列表。
+    - 游戏内组黑信息显示 2 分钟后自动完全隐藏（文字与容器背景均清空）。
+- **稳定性增强：** 增加了 `LcuClient` 缺失的 API 方法，清理了冗余的 `champion_id_name_map` 缓存警告。

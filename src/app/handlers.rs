@@ -338,7 +338,10 @@ async fn loop_pick_until_refresh(
     let mut s = state.lock();
     if s.pick_generation == generation {
         s.active_pick_slot = None;
-        let _ = overlay_tx.clone().send(OverlayCmd::ClearSelectedSlot);
+        let tx = overlay_tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(OverlayCmd::ClearSelectedSlot).await;
+        });
     }
 }
 
