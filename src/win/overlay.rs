@@ -39,6 +39,7 @@ const TRAY_UID: u32 = 1;
 const ID_QUIT: usize = 1001;
 const ID_RELOAD_UX: usize = 1002;
 const ID_PLAY_AGAIN: usize = 1003;
+const ID_FIND_LOOT: usize = 1004;
 
 const ID_AUTO_ACCEPT: usize = 2001;
 const ID_AUTO_HONOR: usize = 2002;
@@ -71,6 +72,7 @@ pub enum OverlayCmd {
     Show,
     Hide,
     UpdateHud(String, String),
+    UpdateProphet(String),    
     ShowBench(bool),          
     SetSelectedSlot(usize),   
     ClearSelectedSlot,        
@@ -82,6 +84,7 @@ pub enum OverlayCmd {
 pub enum TrayAction {
     ReloadUx,
     PlayAgain,
+    FindForgottenLoot,
 }
 
 #[derive(Clone)]
@@ -104,6 +107,7 @@ impl OverlaySender {
 struct WndState {
     connection: String,
     premade: String,
+    prophet: String,
     config: SharedConfig,
     action_tx: tokio::sync::mpsc::Sender<TrayAction>,
     click_tx: tokio::sync::mpsc::Sender<usize>,
@@ -187,14 +191,31 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
         CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, 
         (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr())
     );
+    let hfont_small = CreateFontW(
+        16, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, 
+        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, 
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, 
+        (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr())
+    );
+
     let old_font = SelectObject(hdc_mem, hfont);
     SetBkMode(hdc_mem, TRANSPARENT);
     
     let mut y = 40; 
     let x = 10;
     if !state.connection.is_empty() { draw_stroked_text(hdc_mem, &state.connection, x, y, rgb(0, 255, 0)); y += 32; }
+    
     if !state.premade.is_empty() {
         for line in state.premade.lines() { draw_stroked_text(hdc_mem, line, x, y, rgb(255, 255, 255)); y += 26; }
+    }
+
+    // 绘制评分信息 (Prophet)
+    if !state.prophet.is_empty() {
+        SelectObject(hdc_mem, hfont_small);
+        for line in state.prophet.lines() {
+            draw_stroked_text(hdc_mem, line, x, y, rgb(200, 200, 200));
+            y += 20;
+        }
     }
 
     let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, (win_w * win_h * 4) as usize);
@@ -210,6 +231,7 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
 
     SelectObject(hdc_mem, old_font);
     let _ = DeleteObject(hfont);
+    let _ = DeleteObject(hfont_small);
     SelectObject(hdc_mem, old_bm);
     let _ = DeleteObject(hbm);
     let _ = DeleteDC(hdc_mem);
@@ -380,6 +402,7 @@ unsafe fn show_tray_menu(tray_hwnd: HWND) {
     if ptr.is_null() { return; }
     let state = &*ptr;
     let hmenu = CreatePopupMenu().unwrap();
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_FIND_LOOT, PCWSTR(to_wide("找回一些遗忘的东西").as_ptr()));
     let _ = AppendMenuW(hmenu, MF_STRING, ID_PLAY_AGAIN, PCWSTR(to_wide("退出结算页面").as_ptr()));
     let _ = AppendMenuW(hmenu, MF_STRING, ID_RELOAD_UX, PCWSTR(to_wide("热重载客户端").as_ptr()));
     let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -413,6 +436,7 @@ unsafe fn handle_menu_command(hwnd: HWND, id: usize) {
     if ptr.is_null() { return; }
     let state = &*ptr;
     match id {
+        ID_FIND_LOOT => { let _ = state.action_tx.try_send(TrayAction::FindForgottenLoot); }
         ID_PLAY_AGAIN => { let _ = state.action_tx.try_send(TrayAction::PlayAgain); }
         ID_RELOAD_UX => { let _ = state.action_tx.try_send(TrayAction::ReloadUx); }
         ID_AUTO_ACCEPT => { let mut c = state.config.lock(); c.auto_accept_enabled = !c.auto_accept_enabled; c.save(); }
@@ -477,7 +501,7 @@ fn overlay_message_loop(
     };
 
     let state = Box::new(WndState {
-        connection: "等待连接...".to_owned(), premade: String::new(), config, action_tx, click_tx,
+        connection: "等待连接...".to_owned(), premade: String::new(), prophet: String::new(), config, action_tx, click_tx,
         show_bench: false, selected_slot: None, win_w: 1920, win_h: 1080,
     });
     let state_ptr = Box::into_raw(state);
@@ -526,6 +550,10 @@ fn overlay_message_loop(
                 OverlayCmd::UpdateHud(conn, prem) => {
                     s.connection = conn;
                     s.premade = prem;
+                    needs_paint_hud = true;
+                }
+                OverlayCmd::UpdateProphet(info) => {
+                    s.prophet = info;
                     needs_paint_hud = true;
                 }
                 OverlayCmd::ShowBench(show) => { 

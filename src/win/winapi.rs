@@ -412,7 +412,36 @@ pub fn need_resize(rect: &RECT) -> bool {
     (ratio - (9.0 / 16.0)).abs() > 0.002
 }
 
-/// 按 zoom_scale 修复 LCU 窗口尺寸（含 DPI patch + 重绘）。
+/// 递归对齐所有 CEF 相关子窗口，确保它们填满父级窗口客户区。
+pub unsafe fn align_all_cef_windows(parent: HWND) {
+    let mut child = HWND::default();
+    loop {
+        child = match FindWindowExW(parent, child, PCWSTR::null(), PCWSTR::null()) {
+            Ok(h) if !h.is_invalid() => h,
+            _ => break,
+        };
+
+        let class = get_window_class(child);
+        // CEF 关键窗口类名：CefBrowserWindow, Chrome_WidgetWin_0, Chrome_RenderWidgetHostHWND
+        if class.contains("Cef") || class.contains("Chrome") {
+            let mut pr = RECT::default();
+            if GetClientRect(parent, &mut pr).is_ok() {
+                let _ = SetWindowPos(child, HWND::default(), 0, 0, pr.right, pr.bottom, SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS);
+            }
+        }
+        align_all_cef_windows(child);
+    }
+}
+
+/// 获取窗口类名。
+fn get_window_class(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if len == 0 { return String::new(); }
+    String::from_utf16_lossy(&buf[..len as usize])
+}
+
+/// 按 zoom_scale 修复 LCU 窗口尺寸（含 DPI patch + 深度对齐）。
 ///
 /// 对应 Python `WinApi.fix_lcu_window_by_zoom()`。
 pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool {
@@ -429,17 +458,13 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
         Some(r) => r,
         None => return false,
     };
-    let cef_rect = match get_window_rect(cef) {
-        Some(r) => r,
-        None => return false,
-    };
 
-    if !forced && !need_resize(&main_rect) && !need_resize(&cef_rect) {
+    if !forced && !need_resize(&main_rect) {
         return false;
     }
 
-    let target_w = (1280.0 * zoom_scale) as i32;
-    let target_h = (720.0 * zoom_scale) as i32;
+    let target_w = (1600.0 * zoom_scale) as i32;
+    let target_h = (900.0 * zoom_scale) as i32;
     if target_w <= 0 || target_h <= 0 {
         return false;
     }
@@ -452,10 +477,14 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
     patch_dpi_changed_message(cef);
 
     let main_ok = set_window_pos(hwnd, target_x, target_y, target_w, target_h, SWP_SHOWWINDOW);
-    let cef_ok = set_window_pos(cef, 0, 0, target_w, target_h, SWP_SHOWWINDOW);
+    
+    unsafe {
+        // 关键增强：深度对齐所有渲染层
+        align_all_cef_windows(hwnd);
+    }
 
     redraw_window(hwnd);
     redraw_window(cef);
 
-    main_ok && cef_ok
+    main_ok
 }

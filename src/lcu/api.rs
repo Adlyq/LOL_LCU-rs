@@ -547,7 +547,16 @@ impl LcuClient {
         .await
     }
 
-    pub async fn get_game_by_id(&self, game_id: i64) -> Result<Value, LcuApiError> {
-        self.get_json(&format!("/lol-match-history/v1/games/{game_id}")).await
+    // ── 战利品 / 奖励 ───────────────────────────────────────────────
+
+    pub async fn get_player_loot(&self) -> Result<Value, LcuApiError> {
+        self.get_json("/lol-loot/v1/player-loot").await
+    }
+
+    pub async fn call_loot_recipe(&self, loot_id: &str, recipe_name: &str) -> Result<Value, LcuApiError> {
+        self.post_json(
+            &format!("/lol-loot/v1/recipes/{recipe_name}/craft?repeat=1"),
+            Some(serde_json::json!([loot_id]))
+        ).await
     }
 }

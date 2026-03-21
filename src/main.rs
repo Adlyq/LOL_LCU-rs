@@ -114,6 +114,7 @@ async fn run_with_reconnect(
         state.lock().reset_session();
         let _ = overlay_tx.send(OverlayCmd::Hide).await;
         let _ = overlay_tx.send(OverlayCmd::ShowBench(false)).await;
+        let _ = overlay_tx.send(OverlayCmd::UpdateProphet(String::new())).await;
         
         sleep(Duration::from_secs(3)).await;
     }
@@ -279,6 +280,10 @@ async fn run_once(
                     Some(TrayAction::PlayAgain) => {
                         let api_c = api.clone();
                         tokio::spawn(async move { let _ = api_c.play_again().await; });
+                    }
+                    Some(TrayAction::FindForgottenLoot) => {
+                        let api_c = api.clone();
+                        tokio::spawn(async move { handlers::handle_find_forgotten_loot(api_c).await; });
                     }
                     None => break,
                 }

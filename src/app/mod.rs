@@ -5,4 +5,5 @@ pub mod handlers;
 pub mod tasks;
 pub mod state;
 pub mod premade;
+pub mod prophet;
 pub mod config;

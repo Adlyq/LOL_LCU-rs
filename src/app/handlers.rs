@@ -3,12 +3,14 @@
 use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::time::sleep;
-use tracing::{info, warn, error, debug};
+use tracing::{info, error, debug};
+use windows::Win32::Foundation::HWND;
 
 use crate::lcu::api::{gameflow, LcuClient};
 use crate::win::overlay::{OverlayCmd, OverlaySender};
 use crate::app::premade::{analyze_premade, extract_teams_from_session, extract_teams_from_gameflow_session, format_premade_message};
 use crate::app::config::SharedConfig;
+use crate::app::prophet;
 use super::state::SharedState;
 
 
@@ -113,23 +115,34 @@ pub async fn handle_gameflow(
 ) {
     let phase = event.get("data").and_then(|v| v.as_str()).unwrap_or(gameflow::NONE);
 
-    // 1. 根据阶段设置可见性
-    if phase == gameflow::CHAMP_SELECT {
-        let _ = overlay_tx.send(OverlayCmd::Show).await;
-    } else if !is_overlay_forced() {
-        match phase {
-            gameflow::IN_PROGRESS | gameflow::GAME_START => {}, // 游戏中保持当前状态（可能是显示中）
-            _ => {
-                let _ = overlay_tx.send(OverlayCmd::Hide).await;
-            }
+    // 1. 根据阶段设置可见性：只要有阶段就显示，除非阶段为 None 且无强制显示
+    if phase == gameflow::NONE {
+        if !is_overlay_forced() {
+            let _ = overlay_tx.send(OverlayCmd::Hide).await;
         }
+    } else {
+        let _ = overlay_tx.send(OverlayCmd::Show).await;
     }
 
     // 2. 状态文字更新
     match phase {
         gameflow::CHAMP_SELECT | gameflow::IN_PROGRESS | gameflow::GAME_START => {}
         _ => {
-            let _ = overlay_tx.send(OverlayCmd::UpdateHud(format!("状态: {phase}"), String::new())).await;
+            let api_c = api.clone();
+            let tx_c = overlay_tx.clone();
+            let phase_str = phase.to_owned();
+            tokio::spawn(async move {
+                let mut status_msg = format!("状态: {phase_str}");
+                if phase_str == gameflow::MATCHMAKING || phase_str == gameflow::READY_CHECK {
+                    if let Ok(session) = api_c.get_gameflow_session().await {
+                        if let Some(queue) = session.get("gameData").and_then(|v| v.get("queue_info")).and_then(|v| v.get("description")).and_then(|v| v.as_str()) {
+                            status_msg = format!("状态: {} ({})", phase_str, queue);
+                        }
+                    }
+                }
+                let _ = tx_c.send(OverlayCmd::UpdateHud(status_msg, String::new())).await;
+            });
+
             let mut s = state.lock();
             s.premade_analysis_done = false;
             s.premade_ingame_done = false;
@@ -223,9 +236,10 @@ pub async fn handle_champ_select(
         None => return,
     };
 
-    // 1. 始终显示 HUD 背景 (尊重强制显示变量)
+    // 1. 始终显示 HUD 且开启背景 (尊重强制显示变量)
     let forced = is_overlay_forced();
     let is_aram = session.get("benchEnabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let _ = overlay_tx.send(OverlayCmd::Show).await;
     let _ = overlay_tx.send(OverlayCmd::ShowBench(forced || is_aram)).await;
 
     // 同步板凳席 ID 列表到状态中
@@ -234,7 +248,7 @@ pub async fn handle_champ_select(
         state.lock().current_bench_ids = bench_ids;
     }
 
-    // 2. 组队分析并显示结果（不再显示板凳英雄列表）
+    // 2. 组队分析与战绩评分（仅分析一次）
     let should_analyze = {
         let s = state.lock();
         !s.premade_analysis_done
@@ -245,16 +259,34 @@ pub async fn handle_champ_select(
         let tx_c = overlay_tx.clone();
         tokio::spawn(async move {
             let (my_raw, their_raw, my_side, their_side) = extract_teams_from_session(&session);
-            // 这里 my_raw 已经包含 (puuid, nickname, champion_id)
-            let my_team = my_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
-            let their_team = their_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
-
-            let (my_res, their_res) = analyze_premade(&api_c, my_team, their_team, 3, 20).await;
-            let msg = format_premade_message(&my_res, &their_res, my_side, their_side);
             
-            // 选人界面的主要内容是组黑分析结果（包含昵称）
-            let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), msg.clone())).await;
-            let _ = api_c.send_message_to_self(&msg).await;
+            // --- 组黑分析 ---
+            let my_team_p = my_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
+            let their_team_p = their_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
+            let (my_res, their_res) = analyze_premade(&api_c, my_team_p, their_team_p, 3, 20).await;
+            let premade_msg = format_premade_message(&my_res, &their_res, my_side, their_side);
+            let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), premade_msg)).await;
+
+            // --- Prophet 评分分析 ---
+            let mut prophet_lines = Vec::new();
+            for (puuid, name, _) in &my_raw {
+                if let Ok(history) = api_c.get_match_history(puuid, 8).await {
+                    let games = history.get("games").and_then(|v| v.as_array())
+                        .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
+                    
+                    if let Some(matches) = games {
+                        if let Some(rating) = prophet::calculate_player_rating(puuid, matches) {
+                            let grade = prophet::get_grade_name(rating.score);
+                            prophet_lines.push(format!("{} {} 评分:{:.0} KDA:{:.1} 胜率:{:.0}%", 
+                                grade, name, rating.score, rating.avg_kda, rating.win_rate * 100.0));
+                        }
+                    }
+                }
+            }
+            if !prophet_lines.is_empty() {
+                let prophet_msg = format!("[队友评分]\n{}", prophet_lines.join("\n"));
+                let _ = tx_c.send(OverlayCmd::UpdateProphet(prophet_msg)).await;
+            }
         });
     }
 }
@@ -352,6 +384,77 @@ async fn loop_pick_until_refresh(
         tokio::spawn(async move {
             let _ = tx.send(OverlayCmd::ClearSelectedSlot).await;
         });
+    }
+}
+
+// ── handle_find_forgotten_loot ───────────────────────────────────
+
+pub async fn handle_find_forgotten_loot(api: LcuClient) {
+    let loot_list = match api.get_player_loot().await {
+        Ok(v) => v,
+        Err(e) => { error!("获取战利品失败: {e}"); return; }
+    };
+
+    let Some(loots) = loot_list.as_array() else { return; };
+    let mut claimable = Vec::new();
+
+    for loot in loots {
+        let loot_id = loot.get("lootId").and_then(|v| v.as_str()).unwrap_or("");
+        let count = loot.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+        let loot_name = loot.get("localizedName").and_then(|v| v.as_str())
+            .or_else(|| loot.get("localizedDescription").and_then(|v| v.as_str()))
+            .unwrap_or(loot_id);
+
+        if count <= 0 { continue; }
+
+        // 识别逻辑：匹配常见的可领取奖励前缀
+        // 参考 Akari: CURRENCY_champion_faceoff, REWARD_..., CHEST_...
+        let is_reward = loot_id.starts_with("REWARD_") 
+            || loot_id.contains("champion_faceoff")
+            || loot_id.starts_with("CHEST_")
+            || loot_id.contains("_REWARD");
+
+        if is_reward {
+            // 尝试寻找配方：Akari 常用的是 CHEST_generic_OPEN 或 REWARD_claim
+            let recipe = if loot_id.starts_with("CHEST_") { "CHEST_generic_OPEN" } else { "REWARD_claim" };
+            claimable.push((loot_id.to_owned(), loot_name.to_owned(), recipe.to_owned(), count));
+        }
+    }
+
+    if claimable.is_empty() {
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::*;
+            use windows::core::PCWSTR;
+            let text = crate::win::winapi::to_wide("没有发现可领取的遗忘资源。");
+            let caption = crate::win::winapi::to_wide("战利品检查");
+            MessageBoxW(HWND::default(), PCWSTR(text.as_ptr()), PCWSTR(caption.as_ptr()), MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+        }
+        return;
+    }
+
+    let mut list_str = String::new();
+    for (_, name, _, count) in &claimable {
+        list_str.push_str(&format!(" - {} (数量: {})\n", name, count));
+    }
+
+    let msg = format!("发现以下可领取资源：\n\n{}\n是否立即找回？", list_str);
+    
+    let confirm = unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::core::PCWSTR;
+        let text = crate::win::winapi::to_wide(&msg);
+        let caption = crate::win::winapi::to_wide("找回遗忘的东西");
+        let res = MessageBoxW(HWND::default(), PCWSTR(text.as_ptr()), PCWSTR(caption.as_ptr()), MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND);
+        res == IDOK
+    };
+
+    if confirm {
+        info!("正在开始找回战利品...");
+        for (id, name, recipe, _) in claimable {
+            debug!("正在领取: {} (ID: {}, 配方: {})", name, id, recipe);
+            let _ = api.call_loot_recipe(&id, &recipe).await;
+        }
+        info!("找回任务执行完毕。");
     }
 }
 
