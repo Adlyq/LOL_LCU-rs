@@ -124,6 +124,15 @@ async fn run_once(
 
     let _ = overlay_tx.send(OverlayCmd::UpdateHud(format!("已连接: {display_name}"), String::new())).await;
 
+    // 启动后台任务
+    {
+        let api_c = api.clone();
+        let config_c = config.clone();
+        tokio::spawn(async move {
+            app::tasks::memory_monitor_loop(api_c, config_c).await;
+        });
+    }
+
     // 触发初始阶段处理
     {
         let api_c = api.clone();

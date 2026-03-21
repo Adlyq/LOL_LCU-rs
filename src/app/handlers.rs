@@ -11,7 +11,6 @@ use crate::app::premade::{analyze_premade, extract_teams_from_session, extract_t
 use crate::app::config::SharedConfig;
 use super::state::SharedState;
 
-const HONOR_SKIP_FALLBACK_COOLDOWN_SECS: u64 = 30;
 const POSTGAME_CONTINUE_DELAY_SECS: f64 = 0.8;
 
 fn event_data(event: &Value) -> Option<&Value> {
@@ -164,11 +163,10 @@ pub async fn handle_honor_ballot(
         let state_c = state.clone();
         tokio::spawn(async move {
             sleep(Duration::from_secs_f64(POSTGAME_CONTINUE_DELAY_SECS)).await;
-            if api_c.get_gameflow_phase().await.unwrap_or_default() == gameflow::END_OF_GAME {
-                if crate::win::winapi::click_postgame_continue(None) {
+            if api_c.get_gameflow_phase().await.unwrap_or_default() == gameflow::END_OF_GAME
+                && crate::win::winapi::click_postgame_continue(None) {
                     state_c.lock().last_post_honor_continue_game_id = game_id;
                 }
-            }
         });
     }
 }

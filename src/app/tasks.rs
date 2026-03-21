@@ -41,7 +41,7 @@ pub async fn memory_monitor_loop(api: LcuClient, config: SharedConfig) {
         if mem_mb == 0 || mem_mb < threshold_mb { continue; }
 
         warn!("LeagueClientUx 内存 {mem_mb} MB 超过阈值 {threshold_mb} MB，触发自动热重载...");
-        if let Ok(_) = api.reload_ux().await {
+        if api.reload_ux().await.is_ok() {
             info!("内存超限热重载已触发");
             last_reload = Some(std::time::Instant::now());
         }
@@ -56,7 +56,7 @@ fn get_lcu_ux_memory_mb() -> u64 {
         false,
         ProcessRefreshKind::new().with_memory(),
     );
-    for (_, process) in sys.processes() {
+    for process in sys.processes().values() {
         if process.name().to_string_lossy().to_lowercase().contains("leagueclientux") {
             return process.memory() / 1_048_576;
         }

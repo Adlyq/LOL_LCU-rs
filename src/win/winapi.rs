@@ -244,7 +244,7 @@ pub fn patch_dpi_changed_message(hwnd: HWND) {
         return;
     }
     unsafe {
-        let dpi = GetDpiForWindow(hwnd) as u32;
+        let dpi = GetDpiForWindow(hwnd);
         if dpi == 0 {
             return;
         }

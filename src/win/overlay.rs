@@ -369,7 +369,7 @@ fn overlay_message_loop(
 unsafe fn add_tray_icon(hwnd: HWND) {
     let hinstance = GetModuleHandleW(None).unwrap();
     // 资源 ID 1 是 winres 默认生成的图标 ID
-    let hicon = LoadIconW(hinstance, windows::core::PCWSTR(1 as *const u16)).unwrap_or_else(|_| {
+    let hicon = LoadIconW(hinstance, windows::core::PCWSTR(std::ptr::dangling::<u16>())).unwrap_or_else(|_| {
         LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap()
     });
     let mut nid = NOTIFYICONDATAW {

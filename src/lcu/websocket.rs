@@ -100,7 +100,7 @@ pub async fn spawn_ws_loop(creds: &LcuCredentials) -> Result<WsHandle> {
     // LCU WebSocket 使用 WAMP-like 协议，必须先发 [5, "OnJsonApiEvent"]
     // 服务端才会开始推送事件（对应 Python willump 的 wlp.subscribe("OnJsonApiEvent")）。
     let subscribe_msg = tungstenite::Message::Text(
-        serde_json::json!([5, "OnJsonApiEvent"]).to_string().into()
+        serde_json::json!([5, "OnJsonApiEvent"]).to_string()
     );
     write
         .send(subscribe_msg)

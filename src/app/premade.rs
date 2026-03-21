@@ -30,6 +30,9 @@ pub struct PremadeGroup {
     pub times: usize,
 }
 
+type ChampSelectTeamData = (Vec<(String, String, i64)>, Vec<(String, String, i64)>, Option<u32>, Option<u32>);
+type GameflowTeamData = (Vec<(String, String)>, Vec<(String, String)>, Option<u32>, Option<u32>);
+
 // ── 分析入口 ──────────────────────────────────────────────────────
 
 /// 分析双方队伍的预组队情况。
@@ -114,7 +117,7 @@ async fn fetch_player_game_id_win_map(
             // 战绩摘要中，participants[0] 通常就是该 PUUID 本人的数据
             let win = g.get("participants")
                 .and_then(|v| v.as_array())
-                .and_then(|arr| arr.get(0))
+                .and_then(|arr| arr.first())
                 .and_then(|p| p.get("stats"))
                 .and_then(|s| s.get("win"))
                 .and_then(|v| v.as_bool())
@@ -181,9 +184,8 @@ fn calc_inferred_premade(
 
     // 3. 聚合结果
     let mut groups_map: HashMap<usize, (Vec<String>, usize)> = HashMap::new();
-    for i in 0..team.len() {
+    for (i, (_, name)) in team.iter().enumerate() {
         let root = find(&mut parent, i);
-        let (_, name) = &team[i];
         let entry = groups_map.entry(root).or_insert((vec![], 0));
         entry.0.push(name.clone());
     }
@@ -240,7 +242,7 @@ fn count_common_games(
 /// 从英雄选择 (ChampSelect) Session 提取玩家。
 pub fn extract_teams_from_session(
     session: &Value,
-) -> (Vec<(String, String, i64)>, Vec<(String, String, i64)>, Option<u32>, Option<u32>) {
+) -> ChampSelectTeamData {
     let extract = |key: &str| -> Vec<(String, String, i64)> {
         session.get(key).and_then(|v| v.as_array()).map(|arr| {
             arr.iter().filter_map(|p| {
@@ -253,8 +255,8 @@ pub fn extract_teams_from_session(
             }).collect()
         }).unwrap_or_default()
     };
-    let my_side = session.get("myTeam").and_then(|v| v.as_array()).and_then(|a| a.get(0)).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
-    let their_side = session.get("theirTeam").and_then(|v| v.as_array()).and_then(|a| a.get(0)).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
+    let my_side = session.get("myTeam").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
+    let their_side = session.get("theirTeam").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
     (extract("myTeam"), extract("theirTeam"), my_side, their_side)
 }
 
@@ -263,7 +265,7 @@ pub fn extract_teams_from_gameflow_session(
     session: &Value,
     my_puuid: &str,
     id_name_map: &HashMap<i64, String>,
-) -> (Vec<(String, String)>, Vec<(String, String)>, Option<u32>, Option<u32>) {
+) -> GameflowTeamData {
     let game_data = session.get("gameData").unwrap_or(session); // 兼容某些版本
     
     let extract_team = |key: &str| -> Vec<(String, String)> {

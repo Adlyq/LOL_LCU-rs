@@ -66,7 +66,7 @@ pub fn find_lcu_credentials() -> Option<LcuCredentials> {
         ProcessRefreshKind::new().with_cmd(UpdateKind::Always),
     );
 
-    for (_, process) in sys.processes() {
+    for process in sys.processes().values() {
         let name = process.name().to_string_lossy().to_lowercase();
         if LCU_PROCESS_NAMES.iter().any(|&n| name == n) {
             let cmd: Vec<String> = process
