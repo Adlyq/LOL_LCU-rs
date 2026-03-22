@@ -84,8 +84,6 @@ pub enum OverlayCmd {
     Quit,
 }
 
-const ID_HOTKEY_F1: i32 = 3001;
-
 #[derive(Debug, Clone)]
 pub enum TrayAction {
     ReloadUx,
@@ -471,7 +469,7 @@ pub fn spawn_overlay_thread(
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static HUD1_TOGGLE_SIGNAL: AtomicBool = AtomicBool::new(false);
-static mut KEYBOARD_HOOK: HHOOK = HHOOK(0);
+static mut KEYBOARD_HOOK: HHOOK = HHOOK(std::ptr::null_mut());
 
 unsafe extern "system" fn keyboard_hook_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if ncode >= 0 && wparam.0 as u32 == WM_KEYDOWN {
@@ -570,7 +568,7 @@ fn overlay_message_loop(
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
             if msg.message == WM_QUIT { 
-                unsafe { UnhookWindowsHookEx(KEYBOARD_HOOK); }
+                unsafe { let _ = UnhookWindowsHookEx(KEYBOARD_HOOK); }
                 return; 
             }
             unsafe { let _ = TranslateMessage(&msg); DispatchMessageW(&msg); }
