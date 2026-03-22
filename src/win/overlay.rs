@@ -468,6 +468,21 @@ pub fn spawn_overlay_thread(
     OverlaySender { tx: cmd_tx, hud_hwnd }
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static HUD1_TOGGLE_SIGNAL: AtomicBool = AtomicBool::new(false);
+static mut KEYBOARD_HOOK: HHOOK = HHOOK(0);
+
+unsafe extern "system" fn keyboard_hook_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if ncode >= 0 && wparam.0 as u32 == WM_KEYDOWN {
+        let kb = *(lparam.0 as *const KBDLLHOOKSTRUCT);
+        if kb.vkCode == VK_F1.0 as u32 {
+            HUD1_TOGGLE_SIGNAL.store(true, Ordering::SeqCst);
+        }
+    }
+    CallNextHookEx(KEYBOARD_HOOK, ncode, wparam, lparam)
+}
+
 fn overlay_message_loop(
     mut cmd_rx: tokio::sync::mpsc::Receiver<OverlayCmd>,
     hwnd_tx: std_mpsc::Sender<SendHwnd>,
@@ -477,6 +492,7 @@ fn overlay_message_loop(
 ) {
     let hinstance = unsafe { GetModuleHandleW(None).unwrap() };
     
+    // ... (窗口注册代码保持不变) ...
     let hud_class_w = to_wide("LOL_LCU_HUD");
     let hud_wc = WNDCLASSW { lpfnWndProc: Some(hud_wnd_proc), hInstance: hinstance.into(), lpszClassName: PCWSTR(hud_class_w.as_ptr()), ..Default::default() };
     unsafe { RegisterClassW(&hud_wc); }
@@ -518,6 +534,9 @@ fn overlay_message_loop(
         
         let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE);
         add_tray_icon(tray_hwnd);
+
+        // 设置全局键盘钩子 (参考 Akari)
+        KEYBOARD_HOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), hinstance, 0).unwrap();
     }
     let _ = hwnd_tx.send(SendHwnd(hud_hwnd));
 
@@ -529,17 +548,13 @@ fn overlay_message_loop(
 
     // 用于 F1 快捷键的临时显示逻辑
     let mut toggle_hide_at: Option<Instant> = None;
-    let mut f1_was_down = false; // 用于边缘触发检测
 
     let mut needs_paint_hud = false;
     let mut needs_paint_bench = false;
 
     loop {
-        // --- 键盘检测 (GetAsyncKeyState) ---
-        // 这种方式比 RegisterHotKey 在游戏中更可靠
-        let f1_is_down = unsafe { (GetAsyncKeyState(VK_F1.0 as i32) as u16 & 0x8000) != 0 };
-        if f1_is_down && !f1_was_down {
-            // F1 按下瞬间 (按下触发一次)
+        // --- 键盘事件处理 (由 Hook 触发) ---
+        if HUD1_TOGGLE_SIGNAL.swap(false, Ordering::SeqCst) {
             if hud1_visible {
                 hud1_visible = false;
                 toggle_hide_at = None;
@@ -551,11 +566,13 @@ fn overlay_message_loop(
                 unsafe { let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE); }
             }
         }
-        f1_was_down = f1_is_down;
 
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
-            if msg.message == WM_QUIT { return; }
+            if msg.message == WM_QUIT { 
+                unsafe { UnhookWindowsHookEx(KEYBOARD_HOOK); }
+                return; 
+            }
             unsafe { let _ = TranslateMessage(&msg); DispatchMessageW(&msg); }
         }
 
