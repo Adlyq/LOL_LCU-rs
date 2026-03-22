@@ -185,11 +185,7 @@ async fn run_once(
         });
     }
 
-    let mut rx_gameflow = ws_handle.subscribe();
-    let mut rx_ready_check = ws_handle.subscribe();
-    let mut rx_honor = ws_handle.subscribe();
-    let mut rx_champ_select = ws_handle.subscribe();
-    let mut rx_lobby = ws_handle.subscribe();
+    let mut rx_ws = ws_handle.subscribe();
 
     loop {
         tokio::select! {
@@ -203,68 +199,15 @@ async fn run_once(
                     });
                 }
             }
-            ev = rx_lobby.recv() => {
+            ev = rx_ws.recv() => {
                 if let Ok(event) = ev {
-                    if event.uri == "/lol-lobby/v2/lobby" {
-                        let api_c = api.clone();
-                        let state_c = state.clone();
-                        let config_c = config.clone();
-                        let tx_c = overlay_tx.clone();
-                        tokio::spawn(async move {
-                            handlers::handle_lobby(api_c, state_c, config_c, tx_c, event.payload).await;
-                        });
-                    }
-                }
-            }
-            ev = rx_gameflow.recv() => {
-                if let Ok(event) = ev {
-                    if event.uri == "/lol-gameflow/v1/gameflow-phase" {
-                        let api_c = api.clone();
-                        let state_c = state.clone();
-                        let config_c = config.clone();
-                        let tx_c = overlay_tx.clone();
-                        tokio::spawn(async move {
-                            handlers::handle_gameflow(api_c, state_c, config_c, tx_c, event.payload).await;
-                        });
-                    }
-                }
-            }
-            ev = rx_ready_check.recv() => {
-                if let Ok(event) = ev {
-                    if event.uri == "/lol-matchmaking/v1/ready-check" {
-                        let api_c = api.clone();
-                        let state_c = state.clone();
-                        let config_c = config.clone();
-                        tokio::spawn(async move {
-                            handlers::handle_ready_check(api_c, state_c, config_c, event.payload).await;
-                        });
-                    }
-                }
-            }
-            ev = rx_honor.recv() => {
-                if let Ok(event) = ev {
-                    if event.uri == "/lol-honor-v2/v1/ballot" {
-                        let api_c = api.clone();
-                        let state_c = state.clone();
-                        let config_c = config.clone();
-                        let tx_c = overlay_tx.clone();
-                        tokio::spawn(async move {
-                            handlers::handle_honor_ballot(api_c, state_c, config_c, tx_c, event.payload).await;
-                        });
-                    }
-                }
-            }
-            ev = rx_champ_select.recv() => {
-                if let Ok(event) = ev {
-                    if event.uri == "/lol-champ-select/v1/session" {
-                        let api_c = api.clone();
-                        let state_c = state.clone();
-                        let config_c = config.clone();
-                        let tx_c = overlay_tx.clone();
-                        tokio::spawn(async move {
-                            handlers::handle_champ_select(api_c, state_c, config_c, tx_c, event.payload).await;
-                        });
-                    }
+                    let api_c = api.clone();
+                    let state_c = state.clone();
+                    let config_c = config.clone();
+                    let tx_c = overlay_tx.clone();
+                    tokio::spawn(async move {
+                        app::dispatcher::dispatch_lcu_event(api_c, state_c, config_c, tx_c, event).await;
+                    });
                 }
             }
             action = action_rx.recv() => {

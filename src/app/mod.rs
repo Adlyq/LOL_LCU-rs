@@ -7,3 +7,4 @@ pub mod state;
 pub mod premade;
 pub mod prophet;
 pub mod config;
+pub mod dispatcher;

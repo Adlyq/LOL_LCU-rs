@@ -55,9 +55,32 @@ impl RuntimeState {
 
     /// 重连时调用：重置会话级别的标记
     pub fn reset_session(&mut self) {
+        self.reset_premade_status();
+        self.cancel_ready_check();
+        self.current_bench_ids.clear();
+        self.cancel_pick_task();
+    }
+
+    /// 重置 Ready Check 状态
+    pub fn cancel_ready_check(&mut self) {
+        self.ready_check_pending_accept = false;
+        self.ready_check_generation += 1;
+    }
+
+    /// 开始 Ready Check（获取新代次）
+    pub fn start_ready_check(&mut self) -> u64 {
+        self.ready_check_pending_accept = true;
+        self.ready_check_generation
+    }
+
+    /// 重置组黑分析状态（通常在阶段切换非游戏阶段时调用）
+    pub fn reset_premade_status(&mut self) {
         self.premade_analysis_done = false;
         self.premade_ingame_done = false;
-        self.current_bench_ids.clear();
+    }
+
+    /// 取消当前抢人任务
+    pub fn cancel_pick_task(&mut self) {
         self.active_pick_slot = None;
         self.pick_generation += 1;
         if let Some(task) = self.pick_task.take() {
