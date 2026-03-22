@@ -135,17 +135,6 @@ pub fn is_minimized(hwnd: HWND) -> bool {
     unsafe { IsIconic(hwnd).as_bool() }
 }
 
-/// 查找子窗口（按类名）。
-pub fn find_child_window(hwnd: HWND, class_name: &str) -> Option<HWND> {
-    let class = to_wide(class_name);
-    unsafe {
-        match FindWindowExW(hwnd, HWND::default(), PCWSTR(class.as_ptr()), PCWSTR::null()) {
-            Ok(h) if !h.is_invalid() => Some(h),
-            _ => None,
-        }
-    }
-}
-
 /// 重绘顶层窗口（含 FrameChanged）。
 ///
 /// 对应 Python `WinApi.redraw_top_level_window()`。
@@ -218,7 +207,7 @@ pub fn auto_redraw_lcu_window(hwnd: HWND) -> bool {
         return false;
     }
     let parent_ok = redraw_top_level_window(hwnd);
-    match find_child_window(hwnd, "CefBrowserWindow") {
+    match find_child_window_recursive(hwnd, "CefBrowserWindow") {
         Some(cef) => {
             let child_ok = redraw_window(cef);
             parent_ok && child_ok
@@ -348,7 +337,7 @@ pub fn click_client_relative(hwnd: HWND, x_ratio: f64, y_ratio: f64) -> bool {
         return false;
     }
 
-    let target = find_child_window(hwnd, "CefBrowserWindow").unwrap_or(hwnd);
+    let target = find_child_window_recursive(hwnd, "CefBrowserWindow").unwrap_or(hwnd);
     let client = match get_client_rect(target) {
         Some(r) => r,
         None => return false,
@@ -401,15 +390,65 @@ pub fn click_postgame_continue(hwnd: Option<HWND>) -> bool {
     click_client_relative(target, x_ratio, y_ratio)
 }
 
-/// 判断窗口比例是否需要修复（偏离 16:9 超过阈值）。
-pub fn need_resize(rect: &RECT) -> bool {
+/// 判断窗口比例是否需要修复（偏离 16:9 超过阈值，或尺寸与缩放不匹配）。
+pub fn need_resize(rect: &RECT, expected_w: i32) -> bool {
     let w = rect.right - rect.left;
     let h = rect.bottom - rect.top;
     if w <= 0 {
         return false;
     }
     let ratio = h as f64 / w as f64;
-    (ratio - (9.0 / 16.0)).abs() > 0.002
+    let ratio_diff = (ratio - (9.0 / 16.0)).abs();
+
+    // 1. 比例不对
+    if ratio_diff > 0.002 {
+        return true;
+    }
+
+    // 2. 比例虽然对，但尺寸与 zoom_scale 不匹配
+    if expected_w > 0 {
+        let size_diff = (w - expected_w).abs();
+        if size_diff > 8 {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// 递归查找子窗口（更可靠的枚举方式）。
+pub fn find_child_window_recursive(hwnd: HWND, class_name_substring: &str) -> Option<HWND> {
+    let class_to_match = class_name_substring.to_lowercase();
+
+    struct EnumCtx {
+        target_class: String,
+        found: Option<HWND>,
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut EnumCtx);
+        let mut buf = [0u16; 256];
+        let len = GetClassNameW(hwnd, &mut buf);
+        if len > 0 {
+            let name = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+            if name.contains(&ctx.target_class) {
+                ctx.found = Some(hwnd);
+                return BOOL(0); // 找到即停止
+            }
+        }
+        BOOL(1)
+    }
+
+    let mut ctx = EnumCtx {
+        target_class: class_to_match,
+        found: None,
+    };
+
+    unsafe {
+        let _ = EnumChildWindows(hwnd, Some(enum_proc), LPARAM(&mut ctx as *mut EnumCtx as isize));
+    }
+
+    ctx.found
 }
 
 /// 递归对齐所有 CEF 相关子窗口，确保它们填满父级窗口客户区。
@@ -426,7 +465,8 @@ pub unsafe fn align_all_cef_windows(parent: HWND) {
         if class.contains("Cef") || class.contains("Chrome") {
             let mut pr = RECT::default();
             if GetClientRect(parent, &mut pr).is_ok() {
-                let _ = SetWindowPos(child, HWND::default(), 0, 0, pr.right, pr.bottom, SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS);
+                // 强制对齐并移除同步标志以提高响应速度
+                let _ = SetWindowPos(child, HWND::default(), 0, 0, pr.right, pr.bottom, SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS | SWP_DEFERERASE);
             }
         }
         align_all_cef_windows(child);
@@ -449,9 +489,10 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
         return false;
     }
 
-    let cef = match find_child_window(hwnd, "CefBrowserWindow") {
+    // 优先尝试递归查找，防止嵌套
+    let cef = match find_child_window_recursive(hwnd, "CefBrowserWindow") {
         Some(h) => h,
-        None => return false,
+        None => hwnd, // 兜底使用主窗口
     };
 
     let main_rect = match get_window_rect(hwnd) {
@@ -459,13 +500,13 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
         None => return false,
     };
 
-    if !forced && !need_resize(&main_rect) {
-        return false;
-    }
-
     let target_w = (1600.0 * zoom_scale) as i32;
     let target_h = (900.0 * zoom_scale) as i32;
     if target_w <= 0 || target_h <= 0 {
+        return false;
+    }
+
+    if !forced && !need_resize(&main_rect, target_w) {
         return false;
     }
 
@@ -473,18 +514,24 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
     let target_x = (screen_w - target_w) / 2;
     let target_y = (screen_h - target_h) / 2;
 
-    patch_dpi_changed_message(hwnd);
-    patch_dpi_changed_message(cef);
+    // 1. 设置主窗口位置
+    let main_ok = set_window_pos(hwnd, target_x, target_y, target_w, target_h, SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOZORDER);
 
-    let main_ok = set_window_pos(hwnd, target_x, target_y, target_w, target_h, SWP_SHOWWINDOW);
-    
+    // 2. 深度同步所有 CEF 层
     unsafe {
-        // 关键增强：深度对齐所有渲染层
         align_all_cef_windows(hwnd);
     }
 
+    // 3. 补丁 DPI 消息（在调整尺寸后触发重绘）
+    patch_dpi_changed_message(hwnd);
+    if !cef.is_invalid() && cef != hwnd {
+        patch_dpi_changed_message(cef);
+    }
+
     redraw_window(hwnd);
-    redraw_window(cef);
+    if !cef.is_invalid() && cef != hwnd {
+        redraw_window(cef);
+    }
 
     main_ok
 }

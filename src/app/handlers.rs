@@ -126,7 +126,16 @@ pub async fn handle_gameflow(
 
     // 2. 状态文字更新
     match phase {
-        gameflow::CHAMP_SELECT | gameflow::IN_PROGRESS | gameflow::GAME_START => {}
+        gameflow::CHAMP_SELECT | gameflow::IN_PROGRESS | gameflow::GAME_START => {
+            // 阶段切换瞬间主动触发一次窗口比例修复
+            let api_c = api.clone();
+            let tx_c = overlay_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(zoom) = api_c.get_riotclient_zoom_scale().await {
+                    let _ = tx_c.send(OverlayCmd::AutoFixWindow(zoom, false)).await;
+                }
+            });
+        }
         _ => {
             let api_c = api.clone();
             let tx_c = overlay_tx.clone();

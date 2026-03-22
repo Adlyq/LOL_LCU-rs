@@ -36,6 +36,7 @@ fn ensure_single_instance() -> windows::Win32::Foundation::HANDLE {
     if unsafe { windows::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS {
         #[cfg(not(debug_assertions))]
         unsafe {
+            use windows::Win32::Foundation::HWND;
             use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
             let text = to_wide("LOL_LCU 已在运行中，不允许重复启动。");
             let caption = to_wide("LOL_LCU");
@@ -51,6 +52,7 @@ fn ensure_single_instance() -> windows::Win32::Foundation::HANDLE {
 #[cfg(not(debug_assertions))]
 fn try_attach_parent_console() {
     use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Console::*;
     unsafe {
         if AttachConsole(ATTACH_PARENT_PROCESS).is_err() { return; }
@@ -267,6 +269,15 @@ async fn run_once(
             }
             action = action_rx.recv() => {
                 match action {
+                    Some(TrayAction::FixWindow) => {
+                        let api_c = api.clone();
+                        let tx_c = overlay_tx.clone();
+                        tokio::spawn(async move {
+                            if let Ok(zoom) = api_c.get_riotclient_zoom_scale().await {
+                                let _ = tx_c.send(OverlayCmd::AutoFixWindow(zoom, true)).await;
+                            }
+                        });
+                    }
                     Some(TrayAction::ReloadUx) => {
                         let api_c = api.clone();
                         tokio::spawn(async move { let _ = api_c.reload_ux().await; });

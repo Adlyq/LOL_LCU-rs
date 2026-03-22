@@ -15,7 +15,7 @@ use crate::win::overlay::{OverlayCmd, OverlaySender};
 pub async fn window_fix_loop(api: LcuClient, overlay_tx: OverlaySender) {
     loop {
         if let Ok(zoom) = api.get_riotclient_zoom_scale().await {
-            let _ = overlay_tx.send(OverlayCmd::AutoFixWindow(zoom)).await;
+            let _ = overlay_tx.send(OverlayCmd::AutoFixWindow(zoom, false)).await;
         }
         sleep(Duration::from_secs(2)).await;
     }

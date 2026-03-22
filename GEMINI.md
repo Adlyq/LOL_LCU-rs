@@ -60,7 +60,22 @@
 ## 开发规范
 - **错误处理：** 应用层使用 `anyhow::Result`，库/模块层使用 `thiserror`。
 - **并发管理：** 事件分发使用 `tokio::spawn` 异步派发；状态同步基于 `parking_lot::Mutex`。
-- **WSL 互操作：** Windows 侧 Rust 工具链编译，通过 HTTP 桥接执行原生指令。
+
+
+## 参考资料
+
+### LCU API 查询
+- [Kebs LCU Explorer](https://lcu.kebs.dev/?i=1): 实时 API 字段参考。
+- [LCU Schema Tool](https://www.mingweisamuel.com/lcu-schema/tool/#/): 完整的 Swagger 定义与数据结构。
+
+### 优秀类似项目
+- [LeagueAkari](https://github.com/LeagueAkari/LeagueAkari): 功能最全面的 Rust 实现 LCU 工具。
+- [fix-lcu-window](https://github.com/LeagueTavern/fix-lcu-window): 专业的 LCU 窗口修复工具实现。
+- [Willump](https://github.com/elliejs/Willump/issues): 经典的 Python LCU 封装库。
+
+### 技术指南
+- [Hextech Docs](https://hextechdocs.dev/tag/lcu/): LCU 逆向工程与 WebSocket 协议详解。
+- [英雄联盟官方 LCU 说明](https://lol.qq.com/cguide/Guide/LCU/LCUapi.html): 官方对本地 LCU 接口的基本描述。
 
 ## 更新日志 (Session Logs)
 

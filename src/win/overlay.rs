@@ -41,6 +41,7 @@ const ID_QUIT: usize = 1001;
 const ID_RELOAD_UX: usize = 1002;
 const ID_PLAY_AGAIN: usize = 1003;
 const ID_FIND_LOOT: usize = 1004;
+const ID_FIX_WINDOW: usize = 1005;
 
 const ID_AUTO_ACCEPT: usize = 2001;
 const ID_AUTO_HONOR: usize = 2002;
@@ -80,7 +81,7 @@ pub enum OverlayCmd {
     ShowBench(bool),          
     SetSelectedSlot(usize),   
     ClearSelectedSlot,        
-    AutoFixWindow(f64),       
+    AutoFixWindow(f64, bool), 
     Quit,
 }
 
@@ -89,6 +90,7 @@ pub enum TrayAction {
     ReloadUx,
     PlayAgain,
     FindForgottenLoot,
+    FixWindow,                
 }
 
 #[derive(Clone)]
@@ -406,6 +408,7 @@ unsafe fn show_tray_menu(tray_hwnd: HWND) {
     if ptr.is_null() { return; }
     let state = &*ptr;
     let hmenu = CreatePopupMenu().unwrap();
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_FIX_WINDOW, PCWSTR(to_wide("修复客户端窗口比例").as_ptr()));
     let _ = AppendMenuW(hmenu, MF_STRING, ID_FIND_LOOT, PCWSTR(to_wide("找回一些遗忘的东西").as_ptr()));
     let _ = AppendMenuW(hmenu, MF_STRING, ID_PLAY_AGAIN, PCWSTR(to_wide("退出结算页面").as_ptr()));
     let _ = AppendMenuW(hmenu, MF_STRING, ID_RELOAD_UX, PCWSTR(to_wide("热重载客户端").as_ptr()));
@@ -440,6 +443,7 @@ unsafe fn handle_menu_command(hwnd: HWND, id: usize) {
     if ptr.is_null() { return; }
     let state = &*ptr;
     match id {
+        ID_FIX_WINDOW => { let _ = state.action_tx.try_send(TrayAction::FixWindow); }
         ID_FIND_LOOT => { let _ = state.action_tx.try_send(TrayAction::FindForgottenLoot); }
         ID_PLAY_AGAIN => { let _ = state.action_tx.try_send(TrayAction::PlayAgain); }
         ID_RELOAD_UX => { let _ = state.action_tx.try_send(TrayAction::ReloadUx); }
@@ -637,9 +641,9 @@ fn overlay_message_loop(
                 OverlayCmd::ClearSelectedSlot => {
                     s.selected_slot = None; needs_paint_bench = true;
                 }
-                OverlayCmd::AutoFixWindow(zoom) => {
+                OverlayCmd::AutoFixWindow(zoom, forced) => {
                     if let Some(target) = winapi::find_lcu_window() {
-                        winapi::fix_lcu_window_by_zoom(target, zoom, false);
+                        winapi::fix_lcu_window_by_zoom(target, zoom, forced);
                     }
                 }
                 OverlayCmd::Quit => return,
@@ -671,8 +675,14 @@ fn overlay_message_loop(
             force_sync = false;
         }
 
-        if needs_paint_hud { unsafe { paint_hud(hud_hwnd, &*state_ptr); } }
-        if needs_paint_bench { unsafe { paint_bench(bench_hwnd, &*state_ptr); } }
+        if needs_paint_hud { 
+            unsafe { paint_hud(hud_hwnd, &*state_ptr); } 
+            needs_paint_hud = false;
+        }
+        if needs_paint_bench { 
+            unsafe { paint_bench(bench_hwnd, &*state_ptr); } 
+            needs_paint_bench = false;
+        }
         
         // 动态频率：若找不到 LCU，降低轮询频率以节能
         let sleep_ms = if target_hwnd.is_none() { 200 } else { 30 };
