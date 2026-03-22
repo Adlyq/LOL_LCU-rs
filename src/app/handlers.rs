@@ -143,9 +143,12 @@ pub async fn handle_gameflow(
                 let _ = tx_c.send(OverlayCmd::UpdateHud(status_msg, String::new())).await;
             });
 
-            let mut s = state.lock();
-            s.premade_analysis_done = false;
-            s.premade_ingame_done = false;
+            {
+                let mut s = state.lock();
+                s.premade_analysis_done = false;
+                s.premade_ingame_done = false;
+            }
+            let _ = overlay_tx.send(OverlayCmd::ClearHud).await;
         }
     }
 
@@ -166,19 +169,51 @@ pub async fn handle_gameflow(
                     let (my_team, their_team, my_side, their_side) = extract_teams_from_gameflow_session(&session, &my_puuid, &id_name);
                     
                     if !my_team.is_empty() || !their_team.is_empty() {
-                        let (my_res, their_res) = analyze_premade(&api2, my_team, their_team, 2, 20).await;
-                        let msg = format_premade_message(&my_res, &their_res, my_side, their_side);
-                        let _ = tx2.send(OverlayCmd::UpdateHud(String::new(), msg.clone())).await;
-                        let _ = api2.send_message_to_self(&msg).await;
+                        // --- 组黑分析 ---
+                        let (my_res, their_res) = analyze_premade(&api2, my_team.clone(), their_team.clone(), 2, 20).await;
+                        let premade_msg = format_premade_message(&my_res, &their_res, my_side, their_side);
+                        let _ = tx2.send(OverlayCmd::UpdateHud(String::new(), premade_msg)).await;
+                        
+                        // --- Prophet 评分分析 (进游戏后显示双方) ---
+                        // 定义一个小闭包来分析整队
+                        let fetch_ratings = |api_c: LcuClient, players: Vec<(String, String)>| async move {
+                            let mut results = Vec::new();
+                            for (puuid, name) in players {
+                                if let Ok(history) = api_c.get_match_history(&puuid, 8).await {
+                                    let games = history.get("games").and_then(|v| v.as_array())
+                                        .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
+                                    if let Some(matches) = games {
+                                        if let Some(rating) = prophet::calculate_player_rating(&puuid, matches) {
+                                            let grade = prophet::get_grade_name(rating.score);
+                                            results.push(format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name, rating.score, rating.avg_kda));
+                                        }
+                                    }
+                                }
+                            }
+                            results
+                        };
 
-                        // 显示 2 分钟后自动隐藏
-                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
-                        // 完全清空 HUD 文字
-                        let _ = tx2.send(OverlayCmd::UpdateHud(String::new(), String::new())).await;
-                        // 如果不是强制显示，则关闭背景容器，达到“不显示任何东西”的效果
-                        if !is_overlay_forced() {
-                            let _ = tx2.send(OverlayCmd::ShowBench(false)).await;
+                        let my_prophet = fetch_ratings(api2.clone(), my_team).await;
+                        let their_prophet = fetch_ratings(api2.clone(), their_team).await;
+
+                        let mut prophet_msg = String::new();
+                        if !my_prophet.is_empty() {
+                            prophet_msg.push_str(&format!("[我方评分]\n{}\n", my_prophet.join("\n")));
                         }
+                        if !their_prophet.is_empty() {
+                            if !prophet_msg.is_empty() { prophet_msg.push_str("\n"); }
+                            prophet_msg.push_str(&format!("[对方评分]\n{}\n", their_prophet.join("\n")));
+                        }
+                        
+                        if !prophet_msg.is_empty() {
+                            let _ = tx2.send(OverlayCmd::UpdateProphet(prophet_msg)).await;
+                        }
+
+                        // --- 2 分钟自动隐藏逻辑 ---
+                        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                        
+                        // 隐藏窗口（不清空内容，以便 F1 唤起）
+                        let _ = tx2.send(OverlayCmd::Hide).await;
                     }
                 }
             });
@@ -268,24 +303,48 @@ pub async fn handle_champ_select(
             let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), premade_msg)).await;
 
             // --- Prophet 评分分析 ---
-            let mut prophet_lines = Vec::new();
+            let mut my_prophet = Vec::new();
             for (puuid, name, _) in &my_raw {
                 if let Ok(history) = api_c.get_match_history(puuid, 8).await {
                     let games = history.get("games").and_then(|v| v.as_array())
                         .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
-                    
                     if let Some(matches) = games {
                         if let Some(rating) = prophet::calculate_player_rating(puuid, matches) {
                             let grade = prophet::get_grade_name(rating.score);
-                            prophet_lines.push(format!("{} {} 评分:{:.0} KDA:{:.1} 胜率:{:.0}%", 
-                                grade, name, rating.score, rating.avg_kda, rating.win_rate * 100.0));
+                            my_prophet.push(format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name, rating.score, rating.avg_kda));
                         }
                     }
                 }
             }
-            if !prophet_lines.is_empty() {
-                let prophet_msg = format!("[队友评分]\n{}", prophet_lines.join("\n"));
-                let _ = tx_c.send(OverlayCmd::UpdateProphet(prophet_msg)).await;
+            
+            let mut their_prophet = Vec::new();
+            for (puuid, name, _) in &their_raw {
+                // 如果 PUUID 看起来无效（如全 0），则跳过
+                if puuid.is_empty() || puuid.starts_with('0') || name.contains("Summoner") { continue; }
+                
+                if let Ok(history) = api_c.get_match_history(puuid, 8).await {
+                    let games = history.get("games").and_then(|v| v.as_array())
+                        .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
+                    if let Some(matches) = games {
+                        if let Some(rating) = prophet::calculate_player_rating(puuid, matches) {
+                            let grade = prophet::get_grade_name(rating.score);
+                            their_prophet.push(format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name, rating.score, rating.avg_kda));
+                        }
+                    }
+                }
+            }
+
+            let mut final_msg = String::new();
+            if !my_prophet.is_empty() {
+                final_msg.push_str(&format!("[我方评分]\n{}\n", my_prophet.join("\n")));
+            }
+            if !their_prophet.is_empty() {
+                if !final_msg.is_empty() { final_msg.push_str("\n"); }
+                final_msg.push_str(&format!("[对方评分]\n{}\n", their_prophet.join("\n")));
+            }
+
+            if !final_msg.is_empty() {
+                let _ = tx_c.send(OverlayCmd::UpdateProphet(final_msg)).await;
             }
         });
     }
@@ -464,34 +523,8 @@ pub async fn handle_lobby(
     _api: LcuClient,
     _state: SharedState,
     _config: SharedConfig,
-    overlay_tx: OverlaySender,
-    event: Value,
+    _overlay_tx: OverlaySender,
+    _event: Value,
 ) {
-    let data = match event_data(&event) {
-        Some(d) => d,
-        None => return,
-    };
-
-    if let Some(members) = data.get("members").and_then(|v| v.as_array()) {
-        let mut names = Vec::new();
-        for m in members {
-            // 尝试获取各种可能的昵称字段
-            let game_name = m.get("gameName").and_then(|v| v.as_str());
-            let tag_line = m.get("tagLine").and_then(|v| v.as_str());
-            let summoner_name = m.get("summonerName").and_then(|v| v.as_str());
-            
-            let name = if let (Some(gn), Some(tl)) = (game_name, tag_line) {
-                if gn.is_empty() { summoner_name.unwrap_or("未知").to_owned() }
-                else { format!("{}#{}", gn, tl) }
-            } else {
-                summoner_name.unwrap_or("未知").to_owned()
-            };
-            names.push(name);
-        }
-        
-        if !names.is_empty() {
-            let lobby_msg = format!("房间成员: {}", names.join(" / "));
-            let _ = overlay_tx.send(OverlayCmd::UpdateHud(lobby_msg, String::new())).await;
-        }
-    }
+    // 房间成员显示逻辑已移除
 }

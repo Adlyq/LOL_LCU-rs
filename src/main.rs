@@ -114,7 +114,7 @@ async fn run_with_reconnect(
         state.lock().reset_session();
         let _ = overlay_tx.send(OverlayCmd::Hide).await;
         let _ = overlay_tx.send(OverlayCmd::ShowBench(false)).await;
-        let _ = overlay_tx.send(OverlayCmd::UpdateProphet(String::new())).await;
+        let _ = overlay_tx.send(OverlayCmd::ClearHud).await;
         
         sleep(Duration::from_secs(3)).await;
     }
@@ -179,12 +179,6 @@ async fn run_once(
                         handlers::handle_champ_select(api_c.clone(), state_c.clone(), config_c.clone(), tx_c.clone(), payload).await;
                     }
                 }
-            }
-            
-            // 4. 尝试同步 Lobby 状态
-            if let Ok(lobby) = api_c.get_lobby().await {
-                let payload = serde_json::json!({ "data": lobby });
-                handlers::handle_lobby(api_c, state_c, config_c, tx_c, payload).await;
             }
         });
     }

@@ -2,8 +2,6 @@
 //! 移植自：https://github.com/real-web-world/hh-lol-prophet
 
 use serde_json::Value;
-use std::collections::HashMap;
-use tracing::debug;
 
 // ── 常量配置 ─────────────────────────────────────────────────────
 
@@ -12,21 +10,20 @@ const RECENT_WINDOW_MS: i64 = 5 * 60 * 60 * 1000; // 5 小时
 const RECENT_WEIGHT: f64 = 0.8;
 const OLD_WEIGHT: f64 = 0.2;
 
-const RANKING_SCORES: [f64; 5] = [10.0, 5.0, 0.0, -5.0, -10.0];
-
 pub fn get_grade_name(score: f64) -> &'static str {
     if score >= 180.0 { "通天代" }
     else if score >= 150.0 { "小代" }
     else if score >= 125.0 { "上等马" }
     else if score >= 105.0 { "中等马" }
     else if score >= 95.0 { "下等马" }
-    else if score >= 80.0 { "牛马" }
+    else if score >= 80.0 { "纯牛马" }
     else { "没有马" }
 }
 
 // ── 数据模型 ─────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct PlayerPerformance {
     pub puuid: String,
     pub name: String,

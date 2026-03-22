@@ -13,6 +13,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Shell::*;
 
@@ -71,6 +72,9 @@ impl FRect {
 pub enum OverlayCmd {
     Show,
     Hide,
+    #[allow(dead_code)]
+    ToggleHud(Duration),      
+    ClearHud,                 
     UpdateHud(String, String),
     UpdateProphet(String),    
     ShowBench(bool),          
@@ -79,6 +83,8 @@ pub enum OverlayCmd {
     AutoFixWindow(f64),       
     Quit,
 }
+
+const ID_HOTKEY_F1: i32 = 3001;
 
 #[derive(Debug, Clone)]
 pub enum TrayAction {
@@ -517,35 +523,84 @@ fn overlay_message_loop(
 
     let mut last_sync = Instant::now();
     let mut last_rect = RECT::default();
-    let mut visible = true; // 默认显示
+    let mut hud1_visible = true; // HUD1 (评分/组黑) 的可见性
     let mut target_hwnd: Option<HWND> = None;
+    let mut force_sync = true; 
+
+    // 用于 F1 快捷键的临时显示逻辑
+    let mut toggle_hide_at: Option<Instant> = None;
+    let mut f1_was_down = false; // 用于边缘触发检测
+
+    let mut needs_paint_hud = false;
+    let mut needs_paint_bench = false;
+
     loop {
+        // --- 键盘检测 (GetAsyncKeyState) ---
+        // 这种方式比 RegisterHotKey 在游戏中更可靠
+        let f1_is_down = unsafe { (GetAsyncKeyState(VK_F1.0 as i32) as u16 & 0x8000) != 0 };
+        if f1_is_down && !f1_was_down {
+            // F1 按下瞬间 (按下触发一次)
+            if hud1_visible {
+                hud1_visible = false;
+                toggle_hide_at = None;
+                unsafe { let _ = ShowWindow(hud_hwnd, SW_HIDE); }
+            } else {
+                hud1_visible = true;
+                toggle_hide_at = Some(Instant::now() + Duration::from_secs(30));
+                needs_paint_hud = true;
+                unsafe { let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE); }
+            }
+        }
+        f1_was_down = f1_is_down;
+
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
             if msg.message == WM_QUIT { return; }
             unsafe { let _ = TranslateMessage(&msg); DispatchMessageW(&msg); }
         }
 
-        let mut needs_paint_hud = false;
-        let mut needs_paint_bench = false;
+        // 检查定时隐藏 (仅针对 HUD1)
+        if let Some(at) = toggle_hide_at {
+            if Instant::now() >= at {
+                hud1_visible = false;
+                toggle_hide_at = None;
+                unsafe { let _ = ShowWindow(hud_hwnd, SW_HIDE); }
+            }
+        }
+
         while let Ok(cmd) = cmd_rx.try_recv() {
             let s = unsafe { &mut *state_ptr };
             match cmd {
                 OverlayCmd::Show => {
-                    visible = true;
+                    hud1_visible = true;
+                    toggle_hide_at = None;
                     needs_paint_hud = true;
                     needs_paint_bench = true;
+                    force_sync = true;
                     unsafe {
                         let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE);
                         if s.show_bench { let _ = ShowWindow(bench_hwnd, SW_SHOWNOACTIVATE); }
                     }
                 }
                 OverlayCmd::Hide => {
-                    visible = false;
+                    hud1_visible = false;
+                    toggle_hide_at = None;
                     unsafe {
                         let _ = ShowWindow(hud_hwnd, SW_HIDE);
                         let _ = ShowWindow(bench_hwnd, SW_HIDE);
                     }
+                }
+                OverlayCmd::ToggleHud(dur) => {
+                    hud1_visible = true;
+                    toggle_hide_at = Some(Instant::now() + dur);
+                    needs_paint_hud = true;
+                    unsafe { let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE); }
+                }
+                OverlayCmd::ClearHud => {
+                    s.connection.clear();
+                    s.premade.clear();
+                    s.prophet.clear();
+                    needs_paint_hud = true;
                 }
                 OverlayCmd::UpdateHud(conn, prem) => {
                     s.connection = conn;
@@ -558,7 +613,8 @@ fn overlay_message_loop(
                 }
                 OverlayCmd::ShowBench(show) => { 
                     s.show_bench = show; needs_paint_bench = true;
-                    unsafe { let _ = ShowWindow(bench_hwnd, if show && visible { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+                    force_sync = true;
+                    unsafe { let _ = ShowWindow(bench_hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
                 }
                 OverlayCmd::SetSelectedSlot(idx) => {
                     s.selected_slot = Some(idx); needs_paint_bench = true;
@@ -575,7 +631,7 @@ fn overlay_message_loop(
             }
         }
 
-        if Instant::now().duration_since(last_sync) >= Duration::from_millis(150) {
+        if Instant::now().duration_since(last_sync) >= Duration::from_millis(150) || force_sync {
             last_sync = Instant::now();
             target_hwnd = winapi::find_lcu_window();
             if let Some(target) = target_hwnd {
@@ -583,21 +639,21 @@ fn overlay_message_loop(
                     let s = unsafe { &mut *state_ptr };
                     let nw = r.right - r.left; let nh = r.bottom - r.top;
                     
-                    // Delta 检查：只有位置或尺寸变化才执行同步
                     let pos_changed = r.left != last_rect.left || r.top != last_rect.top || nw != s.win_w || nh != s.win_h;
                     
-                    if pos_changed {
+                    if pos_changed || force_sync {
                         s.win_w = nw; s.win_h = nh; 
                         last_rect = r;
                         needs_paint_hud = true; 
                         needs_paint_bench = true;
                         
-                        if s.show_bench && visible {
+                        if s.show_bench {
                             winapi::place_window_above_target(bench_hwnd, target, &r);
                         }
                     }
                 }
             }
+            force_sync = false;
         }
 
         if needs_paint_hud { unsafe { paint_hud(hud_hwnd, &*state_ptr); } }
