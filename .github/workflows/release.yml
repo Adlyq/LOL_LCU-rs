@@ -31,11 +31,13 @@ jobs:
       - name: Prepare Artifact
         shell: pwsh
         run: |
-          # 确保目标文件存在并复制到根目录
-          if (Test-Path "target/release/lol_lcu.exe") {
-            Copy-Item "target/release/lol_lcu.exe" "lol_lcu.exe"
+          # 自动寻找构建出来的 exe (兼容 target/release 和 target/x86_64-pc-windows-msvc/release)
+          $exePath = Get-ChildItem -Path "target\**\release\lol_lcu.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          if ($exePath) {
+            Write-Host "Found artifact at: $exePath"
+            Copy-Item $exePath "lol_lcu.exe"
           } else {
-            Write-Error "Could not find build artifact lol_lcu.exe"
+            Write-Error "Could not find lol_lcu.exe in any target directory."
             exit 1
           }
 
