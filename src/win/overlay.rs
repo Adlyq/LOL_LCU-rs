@@ -494,14 +494,16 @@ fn keyboard_hook_loop() {
     }
 }
 
+const WM_HOTKEY_F1: u32 = WM_USER + 102;
+
 unsafe extern "system" fn keyboard_hook_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if ncode >= 0 && wparam.0 as u32 == WM_KEYDOWN {
+    // 改为响应 WM_KEYUP，并投递专用的热键消息
+    if ncode >= 0 && wparam.0 as u32 == WM_KEYUP {
         let kb = *(lparam.0 as *const KBDLLHOOKSTRUCT);
         if kb.vkCode == VK_F1.0 as u32 {
             let target = UI_HWND.load(Ordering::SeqCst);
             if !target.is_null() {
-                // 仅投递异步消息，立即返回，确保不产生输入延迟
-                let _ = PostMessageW(HWND(target), WM_CMD_WAKEUP, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(HWND(target), WM_HOTKEY_F1, WPARAM(0), LPARAM(0));
             }
         }
     }
@@ -586,8 +588,8 @@ fn overlay_message_loop(
             DispatchMessageW(&msg);
         }
 
-        // --- 处理 F1 唤起信号 (响应由 Hook 线程投递的异步消息) ---
-        if msg.message == WM_CMD_WAKEUP {
+        // --- 处理 F1 热键信号 (专用消息) ---
+        if msg.message == WM_HOTKEY_F1 {
             if hud1_visible {
                 hud1_visible = false;
                 toggle_hide_at = None;
@@ -596,9 +598,13 @@ fn overlay_message_loop(
                 hud1_visible = true;
                 toggle_hide_at = Some(Instant::now() + Duration::from_secs(30));
                 needs_paint_hud = true;
+                force_sync = true;
                 unsafe { let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE); }
             }
         }
+
+        // --- 信号消息：WM_CMD_WAKEUP 仅用于唤醒 GetMessageW 以处理指令队列 ---
+        if msg.message == WM_CMD_WAKEUP {}
 
         // --- 定时业务逻辑 ---
         if msg.message == WM_TIMER && msg.wParam.0 == 1 {
@@ -629,6 +635,7 @@ fn overlay_message_loop(
                         hud1_visible = true;
                         toggle_hide_at = Some(Instant::now() + dur);
                         needs_paint_hud = true;
+                        force_sync = true;
                         unsafe { let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE); }
                     }
                     OverlayCmd::ClearHud => {
@@ -638,13 +645,17 @@ fn overlay_message_loop(
                         needs_paint_hud = true;
                     }
                     OverlayCmd::UpdateHud(conn, prem) => {
-                        s.connection = conn;
-                        s.premade = prem;
-                        needs_paint_hud = true;
+                        if s.connection != conn || s.premade != prem {
+                            s.connection = conn;
+                            s.premade = prem;
+                            needs_paint_hud = true;
+                        }
                     }
                     OverlayCmd::UpdateProphet(info) => {
-                        s.prophet = info;
-                        needs_paint_hud = true;
+                        if s.prophet != info {
+                            s.prophet = info;
+                            needs_paint_hud = true;
+                        }
                     }
                     OverlayCmd::ShowBench(show) => { 
                         s.show_bench = show; needs_paint_bench = true;
@@ -652,10 +663,14 @@ fn overlay_message_loop(
                         unsafe { let _ = ShowWindow(bench_hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
                     }
                     OverlayCmd::SetSelectedSlot(idx) => {
-                        s.selected_slot = Some(idx); needs_paint_bench = true;
+                        if s.selected_slot != Some(idx) {
+                            s.selected_slot = Some(idx); needs_paint_bench = true;
+                        }
                     }
                     OverlayCmd::ClearSelectedSlot => {
-                        s.selected_slot = None; needs_paint_bench = true;
+                        if s.selected_slot.is_some() {
+                            s.selected_slot = None; needs_paint_bench = true;
+                        }
                     }
                     OverlayCmd::AutoFixWindow(zoom, forced) => {
                         if let Some(target) = winapi::find_lcu_window() {
@@ -684,16 +699,16 @@ fn overlay_message_loop(
                 if let Some(target) = target_hwnd {
                     if let Some(r) = winapi::get_window_rect(target) {
                         let s = unsafe { &mut *state_ptr };
-                        let nw = r.right - r.left; let nh = r.bottom - r.top;
-                        
+                        let nw = r.right - r.left;
+                        let nh = r.bottom - r.top;
                         let pos_changed = r.left != last_rect.left || r.top != last_rect.top || nw != s.win_w || nh != s.win_h;
                         
                         if pos_changed || force_sync {
-                            s.win_w = nw; s.win_h = nh; 
+                            s.win_w = nw;
+                            s.win_h = nh;
                             last_rect = r;
-                            needs_paint_hud = true; 
+                            needs_paint_hud = true;
                             needs_paint_bench = true;
-                            
                             if s.show_bench {
                                 winapi::place_window_above_target(bench_hwnd, target, &r);
                             }
@@ -704,17 +719,16 @@ fn overlay_message_loop(
             }
 
             // 4. 按需重绘
-            if needs_paint_hud { 
-                unsafe { paint_hud(hud_hwnd, &*state_ptr); } 
+            if needs_paint_hud && hud1_visible {
+                unsafe { paint_hud(hud_hwnd, &*state_ptr); }
                 needs_paint_hud = false;
             }
-            if needs_paint_bench { 
-                unsafe { paint_bench(bench_hwnd, &*state_ptr); } 
+            if needs_paint_bench && unsafe { (*state_ptr).show_bench } {
+                unsafe { paint_bench(bench_hwnd, &*state_ptr); }
                 needs_paint_bench = false;
             }
         }
     }
-
 }
 
 unsafe fn add_tray_icon(hwnd: HWND) {

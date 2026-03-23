@@ -44,66 +44,26 @@ fn is_window_visible(hwnd: HWND) -> bool {
 // ── 公开 API ──────────────────────────────────────────────────────
 
 /// 查找 League of Legends 客户端窗口句柄。
-///
-/// 对应 Python `WinApi.find_lcu_window()`。
+/// 一比一复刻自 fix-lcu-window 逻辑，但增加了可见性过滤以提升在复杂环境下的稳定性。
 pub fn find_lcu_window() -> Option<HWND> {
     unsafe {
-        // 精确类名匹配（最快路径）
         let class = to_wide("RCLIENT");
         let title = to_wide("League of Legends");
-        let exact = FindWindowW(PCWSTR(class.as_ptr()), PCWSTR(title.as_ptr()));
-        if let Ok(h) = exact {
-            if !h.is_invalid() {
-                return Some(h);
+        
+        // 尝试查找所有 RCLIENT 窗口，直到找到可见的那一个
+        let mut current_hwnd = HWND::default();
+        loop {
+            current_hwnd = match FindWindowExW(HWND::default(), current_hwnd, PCWSTR(class.as_ptr()), PCWSTR(title.as_ptr())) {
+                Ok(h) if !h.is_invalid() => h,
+                _ => break,
+            };
+
+            if IsWindowVisible(current_hwnd).as_bool() {
+                return Some(current_hwnd);
             }
         }
     }
-
-    // 枚举所有顶层窗口
-    struct Ctx {
-        candidates: Vec<(HWND, String)>,
-    }
-
-    let mut ctx = Ctx { candidates: vec![] };
-
-    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let ctx = &mut *(lparam.0 as *mut Ctx);
-        if !IsWindowVisible(hwnd).as_bool() {
-            return BOOL(1);
-        }
-        let title = get_window_title(hwnd);
-        if title.is_empty() {
-            return BOOL(1);
-        }
-        let lower = title.to_lowercase();
-        let keywords = [
-            "league of legends",
-            "leagueclientux",
-            "league client",
-            "英雄联盟",
-        ];
-        if keywords.iter().any(|kw| lower.contains(kw)) {
-            ctx.candidates.push((hwnd, title));
-        }
-        BOOL(1)
-    }
-
-    unsafe {
-        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut Ctx as isize));
-    }
-
-    if ctx.candidates.is_empty() {
-        return None;
-    }
-
-    // 优先包含 "League of Legends" 或 "英雄联盟" 的窗口
-    for (hwnd, title) in &ctx.candidates {
-        let lower = title.to_lowercase();
-        if lower.contains("league of legends") || title.contains("英雄联盟") {
-            return Some(*hwnd);
-        }
-    }
-    Some(ctx.candidates[0].0)
+    None
 }
 
 /// 获取窗口矩形（屏幕坐标）。
@@ -480,9 +440,15 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
     }
 
     // 1. 获取窗口句柄
-    // fix-lcu-window: FindWindowEx(LeagueClientWindowHWnd, IntPtr.Zero, "CefBrowserWindow", null)
+    // fix-lcu-window 原版仅使用 FindWindowEx (仅查找直接子窗口)
     let class_cef = to_wide("CefBrowserWindow");
-    let cef = unsafe { FindWindowExW(hwnd, HWND::default(), PCWSTR(class_cef.as_ptr()), PCWSTR::null()).unwrap_or_default() };
+    let mut cef = unsafe { FindWindowExW(hwnd, HWND::default(), PCWSTR(class_cef.as_ptr()), PCWSTR::null()).unwrap_or_default() };
+    
+    // [兼容性补丁]: 某些版本 LCU 窗口结构存在嵌套，若直接查找失败则尝试递归查找
+    if cef.is_invalid() {
+        cef = find_child_window_recursive(hwnd, "CefBrowserWindow").unwrap_or_default();
+    }
+
     if cef.is_invalid() {
         return false;
     }
@@ -497,7 +463,10 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
         None => return false,
     };
 
-    if !forced && !need_resize(&main_rect) && !need_resize(&cef_rect) {
+    let main_need = need_resize(&main_rect);
+    let cef_need = need_resize(&cef_rect);
+
+    if !forced && !main_need && !cef_need {
         return false;
     }
 
