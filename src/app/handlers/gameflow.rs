@@ -1,4 +1,5 @@
 use serde_json::Value;
+use tokio::task::JoinSet;
 
 use crate::lcu::api::{gameflow, LcuClient};
 use crate::win::overlay::{OverlayCmd, OverlaySender};
@@ -85,39 +86,82 @@ pub async fn handle_gameflow(
                         let _ = tx2.send(OverlayCmd::UpdateHud(String::new(), premade_msg)).await;
                         
                         // --- Prophet 评分分析 (进游戏后显示双方) ---
-                        // 定义一个小闭包来分析整队
-                        let fetch_ratings = |api_c: LcuClient, players: Vec<(String, String)>| async move {
-                            let mut results = Vec::new();
-                            for (puuid, name) in players {
-                                if let Ok(history) = api_c.get_match_history(&puuid, 8).await {
+                        let mut my_prophet_results = vec![None; my_team.len()];
+                        let mut their_prophet_results = vec![None; their_team.len()];
+                        
+                        let mut my_set = JoinSet::new();
+                        for (idx, (puuid, name)) in my_team.iter().enumerate() {
+                            let api_cc = api2.clone();
+                            let puuid_cc = puuid.clone();
+                            let name_cc = name.clone();
+                            my_set.spawn(async move {
+                                let mut res = format!("-- {} 评分:获取失败", name_cc);
+                                if let Ok(history) = api_cc.get_match_history(&puuid_cc, 8).await {
                                     let games = history.get("games").and_then(|v| v.as_array())
                                         .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
                                     if let Some(matches) = games {
-                                        if let Some(rating) = prophet::calculate_player_rating(&puuid, matches) {
+                                        if let Some(rating) = prophet::calculate_player_rating(&puuid_cc, matches) {
                                             let grade = prophet::get_grade_name(rating.score);
-                                            results.push(format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name, rating.score, rating.avg_kda));
+                                            res = format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name_cc, rating.score, rating.avg_kda);
                                         }
                                     }
                                 }
+                                (idx, res)
+                            });
+                        }
+
+                        let mut their_set = JoinSet::new();
+                        for (idx, (puuid, name)) in their_team.iter().enumerate() {
+                            let api_cc = api2.clone();
+                            let puuid_cc = puuid.clone();
+                            let name_cc = name.clone();
+                            their_set.spawn(async move {
+                                let mut res = format!("-- {} 评分:获取失败", name_cc);
+                                if let Ok(history) = api_cc.get_match_history(&puuid_cc, 8).await {
+                                    let games = history.get("games").and_then(|v| v.as_array())
+                                        .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
+                                    if let Some(matches) = games {
+                                        if let Some(rating) = prophet::calculate_player_rating(&puuid_cc, matches) {
+                                            let grade = prophet::get_grade_name(rating.score);
+                                            res = format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name_cc, rating.score, rating.avg_kda);
+                                        }
+                                    }
+                                }
+                                (idx, res)
+                            });
+                        }
+
+                        // 动态更新循环
+                        let tx2_c = tx2.clone();
+                        let my_team_c = my_team.clone();
+                        let their_team_c = their_team.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::select! {
+                                    Some(Ok((idx, res))) = my_set.join_next() => {
+                                        my_prophet_results[idx] = Some(res);
+                                    }
+                                    Some(Ok((idx, res))) = their_set.join_next() => {
+                                        their_prophet_results[idx] = Some(res);
+                                    }
+                                    else => break,
+                                }
+
+                                let mut prophet_msg = String::new();
+                                let my_lines: Vec<String> = my_team_c.iter().enumerate().map(|(i, (_, name))| {
+                                    my_prophet_results[i].clone().unwrap_or_else(|| format!("-- {} 评分:加载中...", name))
+                                }).collect();
+                                prophet_msg.push_str(&format!("[我方评分]\n{}\n", my_lines.join("\n")));
+
+                                let their_lines: Vec<String> = their_team_c.iter().enumerate().map(|(i, (_, name))| {
+                                    their_prophet_results[i].clone().unwrap_or_else(|| format!("-- {} 评分:加载中...", name))
+                                }).collect();
+                                if !their_lines.is_empty() {
+                                    prophet_msg.push_str(&format!("\n[对方评分]\n{}\n", their_lines.join("\n")));
+                                }
+                                let _ = tx2_c.send(OverlayCmd::UpdateProphet(prophet_msg)).await;
                             }
-                            results
-                        };
-
-                        let my_prophet = fetch_ratings(api2.clone(), my_team).await;
-                        let their_prophet = fetch_ratings(api2.clone(), their_team).await;
-
-                        let mut prophet_msg = String::new();
-                        if !my_prophet.is_empty() {
-                            prophet_msg.push_str(&format!("[我方评分]\n{}\n", my_prophet.join("\n")));
-                        }
-                        if !their_prophet.is_empty() {
-                            if !prophet_msg.is_empty() { prophet_msg.push_str("\n"); }
-                            prophet_msg.push_str(&format!("[对方评分]\n{}\n", their_prophet.join("\n")));
-                        }
-                        
-                        if !prophet_msg.is_empty() {
-                            let _ = tx2.send(OverlayCmd::UpdateProphet(prophet_msg)).await;
-                        }
+                        });
 
                         // --- 2 分钟自动隐藏逻辑 ---
                         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
