@@ -88,6 +88,14 @@ pub async fn handle_gameflow(
                         // --- Prophet 评分分析 (进游戏后显示双方) ---
                         let mut my_prophet_results = vec![None; my_team.len()];
                         let mut their_prophet_results = vec![None; their_team.len()];
+
+                        // 立即发送一次初始占位信息，让用户知道正在加载
+                        let mut init_msg = String::new();
+                        let my_init: Vec<String> = my_team.iter().map(|(_, name)| format!("-- {} 评分:加载中...", name)).collect();
+                        let their_init: Vec<String> = their_team.iter().map(|(_, name)| format!("-- {} 评分:加载中...", name)).collect();
+                        init_msg.push_str(&format!("[我方评分]\n{}\n", my_init.join("\n")));
+                        init_msg.push_str(&format!("\n[对方评分]\n{}\n", their_init.join("\n")));
+                        let _ = tx2.send(OverlayCmd::UpdateProphet(init_msg)).await;
                         
                         let mut my_set = JoinSet::new();
                         for (idx, (puuid, name)) in my_team.iter().enumerate() {
@@ -96,15 +104,24 @@ pub async fn handle_gameflow(
                             let name_cc = name.clone();
                             my_set.spawn(async move {
                                 let mut res = format!("-- {} 评分:获取失败", name_cc);
+                                tracing::info!("开始获取我方玩家战绩: {}", name_cc);
                                 if let Ok(history) = api_cc.get_match_history(&puuid_cc, 8).await {
                                     let games = history.get("games").and_then(|v| v.as_array())
                                         .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
                                     if let Some(matches) = games {
+                                        tracing::info!("玩家 {} 战绩拉取成功，共 {} 场", name_cc, matches.len());
                                         if let Some(rating) = prophet::calculate_player_rating(&puuid_cc, matches) {
                                             let grade = prophet::get_grade_name(rating.score);
                                             res = format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name_cc, rating.score, rating.avg_kda);
+                                            tracing::info!("玩家 {} 评分计算完成: {:.0}", name_cc, rating.score);
+                                        } else {
+                                            tracing::warn!("玩家 {} 评分计算返回 None (可能无有效场次)", name_cc);
                                         }
+                                    } else {
+                                        tracing::warn!("玩家 {} 战绩数据解析失败 (缺少 games 字段)", name_cc);
                                     }
+                                } else {
+                                    tracing::error!("玩家 {} 战绩接口请求失败 (重试后)", name_cc);
                                 }
                                 (idx, res)
                             });
@@ -117,15 +134,24 @@ pub async fn handle_gameflow(
                             let name_cc = name.clone();
                             their_set.spawn(async move {
                                 let mut res = format!("-- {} 评分:获取失败", name_cc);
+                                tracing::info!("开始获取对方玩家战绩: {}", name_cc);
                                 if let Ok(history) = api_cc.get_match_history(&puuid_cc, 8).await {
                                     let games = history.get("games").and_then(|v| v.as_array())
                                         .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
                                     if let Some(matches) = games {
+                                        tracing::info!("玩家 {} 战绩拉取成功，共 {} 场", name_cc, matches.len());
                                         if let Some(rating) = prophet::calculate_player_rating(&puuid_cc, matches) {
                                             let grade = prophet::get_grade_name(rating.score);
                                             res = format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name_cc, rating.score, rating.avg_kda);
+                                            tracing::info!("玩家 {} 评分计算完成: {:.0}", name_cc, rating.score);
+                                        } else {
+                                            tracing::warn!("玩家 {} 评分计算返回 None (可能无有效场次)", name_cc);
                                         }
+                                    } else {
+                                        tracing::warn!("玩家 {} 战绩数据解析失败 (缺少 games 字段)", name_cc);
                                     }
+                                } else {
+                                    tracing::error!("玩家 {} 战绩接口请求失败 (重试后)", name_cc);
                                 }
                                 (idx, res)
                             });

@@ -46,21 +46,17 @@ pub async fn handle_champ_select(
         tokio::spawn(async move {
             let (my_raw, their_raw, my_side, their_side) = extract_teams_from_session(&session);
             
-            // --- 组黑分析 ---
+            // --- 组黑分析 (选人阶段仅分析我方) ---
             let my_team_p = my_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
-            let their_team_p = their_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
-            let (my_res, their_res) = analyze_premade(&api_c, my_team_p, their_team_p, 3, 20).await;
+            let (my_res, their_res) = analyze_premade(&api_c, my_team_p, Vec::new(), 3, 20).await;
             let premade_msg = format_premade_message(&my_res, &their_res, my_side, their_side);
             let _ = tx_c.send(OverlayCmd::UpdateHud(String::new(), premade_msg)).await;
 
-            // --- Prophet 评分分析 ---
-            let mut my_prophet = Vec::new();
-            for (_puuid, name, _) in &my_raw {
-                my_prophet.push(format!("-- {} 评分:加载中...", name));
-            }
+            // --- Prophet 评分分析 (选人阶段仅分析我方) ---
             // 立即发送一次初始占位信息
             let mut init_msg = String::new();
-            init_msg.push_str(&format!("[我方评分]\n{}\n", my_prophet.join("\n")));
+            let my_init: Vec<String> = my_raw.iter().map(|(_, name, _)| format!("-- {} 评分:加载中...", name)).collect();
+            init_msg.push_str(&format!("[我方评分]\n{}\n", my_init.join("\n")));
             let _ = tx_c.send(OverlayCmd::UpdateProphet(init_msg)).await;
 
             let mut my_prophet_results = vec![None; my_raw.len()];
@@ -71,37 +67,24 @@ pub async fn handle_champ_select(
                 let name_cc = name.clone();
                 my_set.spawn(async move {
                     let mut res = format!("-- {} 评分:获取失败", name_cc);
+                    tracing::info!("开始获取我方玩家战绩: {}", name_cc);
                     if let Ok(history) = api_cc.get_match_history(&puuid_cc, 8).await {
                         let games = history.get("games").and_then(|v| v.as_array())
                             .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
                         if let Some(matches) = games {
+                            tracing::info!("玩家 {} 战绩拉取成功，共 {} 场", name_cc, matches.len());
                             if let Some(rating) = prophet::calculate_player_rating(&puuid_cc, matches) {
                                 let grade = prophet::get_grade_name(rating.score);
                                 res = format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name_cc, rating.score, rating.avg_kda);
+                                tracing::info!("玩家 {} 评分计算完成: {:.0}", name_cc, rating.score);
+                            } else {
+                                tracing::warn!("玩家 {} 评分计算返回 None", name_cc);
                             }
+                        } else {
+                            tracing::warn!("玩家 {} 战绩数据解析失败 (缺少 games 字段)", name_cc);
                         }
-                    }
-                    (idx, res)
-                });
-            }
-
-            let mut their_prophet_results = vec![None; their_raw.len()];
-            let mut their_set = JoinSet::new();
-            for (idx, (puuid, name, _)) in their_raw.iter().enumerate() {
-                let api_cc = api_c.clone();
-                let puuid_cc = puuid.clone();
-                let name_cc = name.clone();
-                their_set.spawn(async move {
-                    let mut res = format!("-- {} 评分:获取失败", name_cc);
-                    if let Ok(history) = api_cc.get_match_history(&puuid_cc, 8).await {
-                        let games = history.get("games").and_then(|v| v.as_array())
-                            .or_else(|| history.get("games").and_then(|v| v.get("games")).and_then(|v| v.as_array()));
-                        if let Some(matches) = games {
-                            if let Some(rating) = prophet::calculate_player_rating(&puuid_cc, matches) {
-                                let grade = prophet::get_grade_name(rating.score);
-                                res = format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name_cc, rating.score, rating.avg_kda);
-                            }
-                        }
+                    } else {
+                        tracing::error!("玩家 {} 战绩接口请求失败 (重试后)", name_cc);
                     }
                     (idx, res)
                 });
@@ -113,9 +96,6 @@ pub async fn handle_champ_select(
                     Some(Ok((idx, res))) = my_set.join_next() => {
                         my_prophet_results[idx] = Some(res);
                     }
-                    Some(Ok((idx, res))) = their_set.join_next() => {
-                        their_prophet_results[idx] = Some(res);
-                    }
                     else => break,
                 }
 
@@ -124,13 +104,6 @@ pub async fn handle_champ_select(
                     my_prophet_results[i].clone().unwrap_or_else(|| format!("-- {} 评分:加载中...", name))
                 }).collect();
                 final_msg.push_str(&format!("[我方评分]\n{}\n", my_lines.join("\n")));
-
-                let their_lines: Vec<String> = their_raw.iter().enumerate().map(|(i, (_, name, _))| {
-                    their_prophet_results[i].clone().unwrap_or_else(|| format!("-- {} 评分:加载中...", name))
-                }).collect();
-                if !their_lines.is_empty() {
-                    final_msg.push_str(&format!("\n[对方评分]\n{}\n", their_lines.join("\n")));
-                }
                 let _ = tx_c.send(OverlayCmd::UpdateProphet(final_msg)).await;
             }
         });

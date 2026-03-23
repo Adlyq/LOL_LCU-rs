@@ -203,6 +203,13 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
         CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, 
         (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr())
     );
+    // 专门为 Prophet 评分准备的字体 (调大字号)
+    let hfont_prophet = CreateFontW(
+        20, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0, 
+        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, 
+        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, 
+        (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr())
+    );
 
     let old_font = SelectObject(hdc_mem, hfont);
     SetBkMode(hdc_mem, TRANSPARENT);
@@ -217,10 +224,10 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
 
     // 绘制评分信息 (Prophet)
     if !state.prophet.is_empty() {
-        SelectObject(hdc_mem, hfont_small);
+        SelectObject(hdc_mem, hfont_prophet);
         for line in state.prophet.lines() {
             draw_stroked_text(hdc_mem, line, x, y, rgb(200, 200, 200));
-            y += 20;
+            y += 24; // 调大行高
         }
     }
 
@@ -238,6 +245,7 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
     SelectObject(hdc_mem, old_font);
     let _ = DeleteObject(hfont);
     let _ = DeleteObject(hfont_small);
+    let _ = DeleteObject(hfont_prophet);
     SelectObject(hdc_mem, old_bm);
     let _ = DeleteObject(hbm);
     let _ = DeleteDC(hdc_mem);

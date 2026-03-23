@@ -558,15 +558,19 @@ impl LcuClient {
                         .unwrap_or(false);
 
                     if has_games || retry_count >= max_retries {
+                        if !has_games {
+                            tracing::warn!("PUUID={} 战绩查询重试次数耗尽，仍无数据", &puuid[..8.min(puuid.len())]);
+                        }
                         return Ok(v);
                     }
-                    debug!("PUUID={} 战绩暂无数据，准备第 {}/{} 次重试", &puuid[..8.min(puuid.len())], retry_count + 1, max_retries);
+                    tracing::info!("PUUID={} 战绩暂无数据，准备第 {}/{} 次重试", &puuid[..8.min(puuid.len())], retry_count + 1, max_retries);
                 }
                 Err(e) => {
                     if retry_count >= max_retries {
+                        tracing::error!("PUUID={} 战绩查询失败: {}, 且已达到最大重试次数", &puuid[..8.min(puuid.len())], e);
                         return Err(e);
                     }
-                    debug!("PUUID={} 战绩查询失败: {}, 准备第 {}/{} 次重试", &puuid[..8.min(puuid.len())], e, retry_count + 1, max_retries);
+                    tracing::info!("PUUID={} 战绩查询失败: {}, 准备第 {}/{} 次重试", &puuid[..8.min(puuid.len())], e, retry_count + 1, max_retries);
                 }
             }
 

@@ -243,34 +243,44 @@ pub fn extract_teams_from_session(
     session: &Value,
 ) -> ChampSelectTeamData {
     let extract = |key: &str| -> Vec<(String, String, i64)> {
-        let players: Vec<(String, String, i64)> = session.get(key).and_then(|v| v.as_array()).map(|arr| {
-            arr.iter().filter_map(|p| {
-                let puuid = p.get("puuid")?.as_str()?;
-                if puuid.is_empty() { return None; }
+        let players_val = session.get(key).and_then(|v| v.as_array());
+        let mut result = Vec::new();
+        
+        if let Some(arr) = players_val {
+            for p in arr {
+                let puuid_raw = p.get("puuid").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                    .map(|s| s.to_owned())
+                    .or_else(|| p.get("summonerId").and_then(|v| v.as_i64()).map(|id| id.to_string()));
                 
-                // 优先级：gameName#tagLine > displayName > summonerName
-                let game_name = p.get("gameName").and_then(|v| v.as_str());
-                let tag_line = p.get("tagLine").and_then(|v| v.as_str());
-                let display_name = p.get("displayName").and_then(|v| v.as_str());
-                let summoner_name = p.get("summonerName").and_then(|v| v.as_str());
+                let Some(puuid) = puuid_raw else {
+                    tracing::warn!("选人阶段：跳过队伍 {} 中的一个玩家，因为找不到标识符", key);
+                    continue;
+                };
 
-                let name = if let (Some(gn), Some(tl)) = (game_name, tag_line) {
-                    if gn.is_empty() {
-                        display_name.or(summoner_name).unwrap_or(puuid).to_owned()
-                    } else {
-                        format!("{}#{}", gn, tl)
-                    }
+                let game_name = p.get("gameName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let tag_line = p.get("tagLine").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let display_name = p.get("displayName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let summoner_name = p.get("summonerName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+
+                // 优先级：GameName#Tag > DisplayName > SummonerName > "召唤师" (兜底)
+                let name = if let Some(gn) = game_name {
+                    if let Some(tl) = tag_line { format!("{}#{}", gn, tl) } else { gn.to_owned() }
+                } else if let Some(dn) = display_name {
+                    dn.to_owned()
+                } else if let Some(sn) = summoner_name {
+                    sn.to_owned()
                 } else {
-                    display_name.or(summoner_name).unwrap_or(puuid).to_owned()
+                    "召唤师".to_owned()
                 };
 
                 let champ_id = p.get("championId").and_then(|v| v.as_i64()).filter(|&id| id != 0)
                     .or_else(|| p.get("championPickIntent").and_then(|v| v.as_i64())).unwrap_or(0);
-                Some((puuid.to_owned(), name, champ_id))
-            }).collect()
-        }).unwrap_or_default();
-        debug!("提取队伍 {}: {} 人", key, players.len());
-        players
+                
+                result.push((puuid, name, champ_id));
+            }
+        }
+        debug!("提取队伍 {}: {} 人", key, result.len());
+        result
     };
     let my_team = extract("myTeam");
     let their_team = extract("theirTeam");
@@ -285,37 +295,58 @@ pub fn extract_teams_from_gameflow_session(
     my_puuid: &str,
     id_name_map: &HashMap<i64, String>,
 ) -> GameflowTeamData {
-    let game_data = session.get("gameData").unwrap_or(session); // 兼容某些版本
+    let game_data = session.get("gameData").unwrap_or(session);
     
     let extract_team = |key: &str| -> Vec<(String, String)> {
-        let players: Vec<(String, String)> = game_data.get(key).and_then(|v| v.as_array()).map(|arr| {
-            arr.iter().filter_map(|p| {
-                let puuid = p.get("puuid")?.as_str()?;
-                if puuid.is_empty() { return None; }
+        let players_val = game_data.get(key).and_then(|v| v.as_array());
+        let mut result = Vec::new();
 
-                let game_name = p.get("gameName").and_then(|v| v.as_str());
-                let tag_line = p.get("tagLine").and_then(|v| v.as_str());
-                let summoner_name = p.get("summonerName").and_then(|v| v.as_str());
+        if let Some(arr) = players_val {
+            for p in arr {
+                let puuid_raw = p.get("puuid").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                    .map(|s| s.to_owned())
+                    .or_else(|| p.get("summonerId").and_then(|v| v.as_i64()).map(|id| id.to_string()));
 
-                let name = if let (Some(gn), Some(tl)) = (game_name, tag_line) {
-                    if gn.is_empty() {
-                        summoner_name.unwrap_or(puuid).to_owned()
-                    } else {
-                        format!("{}#{}", gn, tl)
-                    }
+                let Some(puuid) = puuid_raw else {
+                    tracing::warn!("对局分析：跳过队伍 {} 中的一个玩家，因为找不到标识符", key);
+                    continue;
+                };
+
+                let game_name = p.get("gameName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let tag_line = p.get("tagLine").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let display_name = p.get("displayName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let summoner_name = p.get("summonerName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+
+                let name = if let Some(gn) = game_name {
+                    if let Some(tl) = tag_line { format!("{}#{}", gn, tl) } else { gn.to_owned() }
+                } else if let Some(dn) = display_name {
+                    dn.to_owned()
+                } else if let Some(sn) = summoner_name {
+                    sn.to_owned()
                 } else {
-                    summoner_name.unwrap_or(puuid).to_owned()
+                    "召唤师".to_owned()
                 };
 
                 let champ_id = p.get("championId").and_then(|v| v.as_i64()).unwrap_or(0);
                 let label = if champ_id != 0 {
-                    if let Some(cname) = id_name_map.get(&champ_id) { format!("{}({})", name, cname) } else { name }
-                } else { name };
-                Some((puuid.to_owned(), label))
-            }).collect()
-        }).unwrap_or_default();
-        debug!("提取对局队伍 {}: {} 人", key, players.len());
-        players
+                    if let Some(cname) = id_name_map.get(&champ_id) { 
+                        // 如果名字是“召唤师”，则只显示 "英雄名"，否则显示 "人名(英雄名)"
+                        if name == "召唤师" {
+                            cname.clone()
+                        } else {
+                            format!("{}({})", name, cname) 
+                        }
+                    } else { 
+                        name 
+                    }
+                } else { 
+                    name 
+                };
+                result.push((puuid, label));
+            }
+        }
+        debug!("提取对局队伍 {}: {} 人", key, result.len());
+        result
     };
 
     let t1 = extract_team("teamOne");
@@ -333,11 +364,22 @@ pub fn format_premade_message(
     their_side: Option<u32>,
 ) -> String {
     let side_label = |s| match s { Some(100) => "🔵蓝队", Some(200) => "🔴红队", _ => "" };
+    
     let fmt_t = |t: &TeamPremade, s| {
+        if t.groups.is_empty() { return None; }
         let head = format!("{} {}", t.team_name, side_label(s));
-        if t.groups.is_empty() { return format!("{}：未检测到预组队", head); }
         let g_strs: Vec<String> = t.groups.iter().map(|g| format!("  {}黑（{}局）：{}", g.summoner_names.len(), g.times, g.summoner_names.join(" / "))).collect();
-        format!("{}：\n{}", head, g_strs.join("\n"))
+        Some(format!("{}：\n{}", head, g_strs.join("\n")))
     };
-    format!("[对局组黑分析]\n{}\n{}", fmt_t(my_team, my_side), fmt_t(their_team, their_side))
+
+    let mut parts = vec!["[对局组黑分析]".to_owned()];
+    if let Some(m) = fmt_t(my_team, my_side) { parts.push(m); }
+    if let Some(t) = fmt_t(their_team, their_side) { parts.push(t); }
+
+    if parts.len() == 1 {
+        // 如果双方都没组黑，显示一个简洁提示
+        return "[对局组黑分析]\n纯路人局".to_owned();
+    }
+
+    parts.join("\n")
 }
