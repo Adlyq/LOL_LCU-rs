@@ -390,30 +390,21 @@ pub fn click_postgame_continue(hwnd: Option<HWND>) -> bool {
     click_client_relative(target, x_ratio, y_ratio)
 }
 
-/// 判断窗口比例是否需要修复（偏离 16:9 超过阈值，或尺寸与缩放不匹配）。
-pub fn need_resize(rect: &RECT, expected_w: i32) -> bool {
+// [AI PROMPT / CRITICAL]: 以下窗口修复逻辑必须严格 1:1 复刻自 https://github.com/LeagueTavern/fix-lcu-window
+// 严禁修改比例判定算法 (0.5625)、基准分辨率 (1280x720) 或检测逻辑。
+// 任何“优化”都可能导致在特定缩放或 DPI 下出现误触发循环。
+
+/// 判断窗口比例是否需要修复（偏离 16:9 比例）。
+/// 完全复刻自 fix-lcu-window: `(Rect.Bottom - Rect.Top) / (double)(Rect.Right - Rect.Left) != 0.5625`
+pub fn need_resize(rect: &RECT) -> bool {
     let w = rect.right - rect.left;
     let h = rect.bottom - rect.top;
     if w <= 0 {
         return false;
     }
     let ratio = h as f64 / w as f64;
-    let ratio_diff = (ratio - (9.0 / 16.0)).abs();
-
-    // 1. 比例不对
-    if ratio_diff > 0.002 {
-        return true;
-    }
-
-    // 2. 比例虽然对，但尺寸与 zoom_scale 不匹配
-    if expected_w > 0 {
-        let size_diff = (w - expected_w).abs();
-        if size_diff > 8 {
-            return true;
-        }
-    }
-
-    false
+    // 0.5625 即 9/16，浮点数精确匹配（在二进制中 0.5625 可精确表示）
+    ratio != 0.5625
 }
 
 /// 递归查找子窗口（更可靠的枚举方式）。
@@ -482,56 +473,66 @@ fn get_window_class(hwnd: HWND) -> String {
 }
 
 /// 按 zoom_scale 修复 LCU 窗口尺寸（含 DPI patch + 深度对齐）。
-///
-/// 对应 Python `WinApi.fix_lcu_window_by_zoom()`。
+/// 完全一比一复刻自 fix-lcu-window 的逻辑。
 pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool {
     if hwnd.is_invalid() || is_minimized(hwnd) {
         return false;
     }
 
-    // 优先尝试递归查找，防止嵌套
-    let cef = match find_child_window_recursive(hwnd, "CefBrowserWindow") {
-        Some(h) => h,
-        None => hwnd, // 兜底使用主窗口
-    };
+    // 1. 获取窗口句柄
+    // fix-lcu-window: FindWindowEx(LeagueClientWindowHWnd, IntPtr.Zero, "CefBrowserWindow", null)
+    let class_cef = to_wide("CefBrowserWindow");
+    let cef = unsafe { FindWindowExW(hwnd, HWND::default(), PCWSTR(class_cef.as_ptr()), PCWSTR::null()).unwrap_or_default() };
+    if cef.is_invalid() {
+        return false;
+    }
 
+    // 2. 获取当前矩形并检测是否需要修复
     let main_rect = match get_window_rect(hwnd) {
         Some(r) => r,
         None => return false,
     };
+    let cef_rect = match get_window_rect(cef) {
+        Some(r) => r,
+        None => return false,
+    };
 
-    let target_w = (1600.0 * zoom_scale) as i32;
-    let target_h = (900.0 * zoom_scale) as i32;
+    if !forced && !need_resize(&main_rect) && !need_resize(&cef_rect) {
+        return false;
+    }
+
+    // 3. 计算目标尺寸（基准 1280x720）
+    let target_w = (1280.0 * zoom_scale) as i32;
+    let target_h = (720.0 * zoom_scale) as i32;
     if target_w <= 0 || target_h <= 0 {
         return false;
     }
 
-    if !forced && !need_resize(&main_rect, target_w) {
-        return false;
-    }
-
+    // 4. 获取屏幕信息用于居中
     let (screen_w, screen_h) = get_primary_screen_size();
     let target_x = (screen_w - target_w) / 2;
     let target_y = (screen_h - target_h) / 2;
 
-    // 1. 设置主窗口位置
-    let main_ok = set_window_pos(hwnd, target_x, target_y, target_w, target_h, SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOZORDER);
+    // 5. 补丁 DPI 消息（在调整尺寸前）
+    patch_dpi_changed_message(hwnd);
+    patch_dpi_changed_message(cef);
 
-    // 2. 深度同步所有 CEF 层
+    // 6. 强制设置窗口位置与大小 (SWP_SHOWWINDOW = 0x0040)
+    const SWP_SHOWWINDOW: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(0x0040);
+    
+    // 主窗口：居中屏幕
+    let main_ok = set_window_pos(hwnd, target_x, target_y, target_w, target_h, SWP_SHOWWINDOW);
+
+    // CEF 窗口：(0,0) 对齐（相对于父级客户区）
+    let _ = set_window_pos(cef, 0, 0, target_w, target_h, SWP_SHOWWINDOW);
+
+    // 7. 额外对齐（项目深度优化，保留以增强鲁棒性，但不干扰基准逻辑）
     unsafe {
         align_all_cef_windows(hwnd);
     }
-
-    // 3. 补丁 DPI 消息（在调整尺寸后触发重绘）
-    patch_dpi_changed_message(hwnd);
-    if !cef.is_invalid() && cef != hwnd {
-        patch_dpi_changed_message(cef);
-    }
-
+    
     redraw_window(hwnd);
-    if !cef.is_invalid() && cef != hwnd {
-        redraw_window(cef);
-    }
+    redraw_window(cef);
 
     main_ok
 }

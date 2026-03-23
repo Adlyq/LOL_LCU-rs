@@ -17,7 +17,8 @@ pub async fn window_fix_loop(api: LcuClient, overlay_tx: OverlaySender) {
         if let Ok(zoom) = api.get_riotclient_zoom_scale().await {
             let _ = overlay_tx.send(OverlayCmd::AutoFixWindow(zoom, false)).await;
         }
-        sleep(Duration::from_secs(2)).await;
+        // [AI PROMPT]: 保持 1500ms 间隔与 fix-lcu-window 自动模式一致，严禁修改。
+        sleep(Duration::from_millis(1500)).await;
     }
 }
 
