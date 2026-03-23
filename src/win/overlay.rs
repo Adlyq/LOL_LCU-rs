@@ -534,7 +534,7 @@ fn overlay_message_loop(
     let hud_hwnd = unsafe {
         CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
             PCWSTR(hud_class_w.as_ptr()), PCWSTR(hud_class_w.as_ptr()), WS_POPUP,
-            0, 0, 1200, 900, None, None, hinstance, None).unwrap()
+            0, 0, 1200, 1200, None, None, hinstance, None).unwrap()
     };
 
     let bench_hwnd = unsafe {

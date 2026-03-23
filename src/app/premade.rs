@@ -239,15 +239,14 @@ fn count_common_games(
 
 // ── Session 提取工具 ──────────────────────────────────────────────
 
-/// 从英雄选择 (ChampSelect) Session 提取玩家。
 pub fn extract_teams_from_session(
     session: &Value,
 ) -> ChampSelectTeamData {
     let extract = |key: &str| -> Vec<(String, String, i64)> {
-        session.get(key).and_then(|v| v.as_array()).map(|arr| {
+        let players: Vec<(String, String, i64)> = session.get(key).and_then(|v| v.as_array()).map(|arr| {
             arr.iter().filter_map(|p| {
                 let puuid = p.get("puuid")?.as_str()?;
-                if puuid.is_empty() || puuid.starts_with('0') { return None; }
+                if puuid.is_empty() { return None; }
                 
                 // 优先级：gameName#tagLine > displayName > summonerName
                 let game_name = p.get("gameName").and_then(|v| v.as_str());
@@ -269,11 +268,15 @@ pub fn extract_teams_from_session(
                     .or_else(|| p.get("championPickIntent").and_then(|v| v.as_i64())).unwrap_or(0);
                 Some((puuid.to_owned(), name, champ_id))
             }).collect()
-        }).unwrap_or_default()
+        }).unwrap_or_default();
+        debug!("提取队伍 {}: {} 人", key, players.len());
+        players
     };
+    let my_team = extract("myTeam");
+    let their_team = extract("theirTeam");
     let my_side = session.get("myTeam").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
     let their_side = session.get("theirTeam").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
-    (extract("myTeam"), extract("theirTeam"), my_side, their_side)
+    (my_team, their_team, my_side, their_side)
 }
 
 /// 从游戏进行中 (Gameflow) Session 提取玩家。
@@ -285,10 +288,10 @@ pub fn extract_teams_from_gameflow_session(
     let game_data = session.get("gameData").unwrap_or(session); // 兼容某些版本
     
     let extract_team = |key: &str| -> Vec<(String, String)> {
-        game_data.get(key).and_then(|v| v.as_array()).map(|arr| {
+        let players: Vec<(String, String)> = game_data.get(key).and_then(|v| v.as_array()).map(|arr| {
             arr.iter().filter_map(|p| {
                 let puuid = p.get("puuid")?.as_str()?;
-                if puuid.is_empty() || puuid.starts_with('0') { return None; }
+                if puuid.is_empty() { return None; }
 
                 let game_name = p.get("gameName").and_then(|v| v.as_str());
                 let tag_line = p.get("tagLine").and_then(|v| v.as_str());
@@ -310,7 +313,9 @@ pub fn extract_teams_from_gameflow_session(
                 } else { name };
                 Some((puuid.to_owned(), label))
             }).collect()
-        }).unwrap_or_default()
+        }).unwrap_or_default();
+        debug!("提取对局队伍 {}: {} 人", key, players.len());
+        players
     };
 
     let t1 = extract_team("teamOne");

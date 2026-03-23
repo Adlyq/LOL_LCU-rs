@@ -69,8 +69,7 @@ pub async fn handle_champ_select(
             
             let mut their_prophet = Vec::new();
             for (puuid, name, _) in &their_raw {
-                // 如果 PUUID 看起来无效（如全 0），则跳过
-                if puuid.is_empty() || puuid.starts_with('0') || name.contains("Summoner") { continue; }
+                if puuid.is_empty() { continue; }
                 
                 if let Ok(history) = api_c.get_match_history(puuid, 8).await {
                     let games = history.get("games").and_then(|v| v.as_array())
