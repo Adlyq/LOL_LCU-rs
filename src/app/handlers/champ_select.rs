@@ -44,7 +44,7 @@ pub async fn handle_champ_select(
         let api_c = api.clone();
         let tx_c = overlay_tx.clone();
         tokio::spawn(async move {
-            let (my_raw, their_raw, my_side, their_side) = extract_teams_from_session(&session);
+            let (my_raw, _their_raw, my_side, their_side) = extract_teams_from_session(&session);
             
             // --- 组黑分析 (选人阶段仅分析我方) ---
             let my_team_p = my_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
