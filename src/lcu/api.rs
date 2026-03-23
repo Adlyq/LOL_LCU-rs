@@ -541,10 +541,38 @@ impl LcuClient {
         count: usize,
     ) -> Result<Value, LcuApiError> {
         let end = count.saturating_sub(1);
-        self.get_json(&format!(
+        let endpoint = format!(
             "/lol-match-history/v1/products/lol/{puuid}/matches?begIndex=0&endIndex={end}"
-        ))
-        .await
+        );
+
+        let mut retry_count = 0;
+        let max_retries = 3;
+
+        loop {
+            match self.get_json(&endpoint).await {
+                Ok(v) => {
+                    // 检查是否包含 games 字段且为数组。
+                    // 某些情况下 LCU 会返回空对象或非数组，表示数据尚未就绪。
+                    let has_games = v.get("games")
+                        .map(|g| g.is_array() || (g.is_object() && g.get("games").map_or(false, |inner| inner.is_array())))
+                        .unwrap_or(false);
+
+                    if has_games || retry_count >= max_retries {
+                        return Ok(v);
+                    }
+                    debug!("PUUID={} 战绩暂无数据，准备第 {}/{} 次重试", &puuid[..8.min(puuid.len())], retry_count + 1, max_retries);
+                }
+                Err(e) => {
+                    if retry_count >= max_retries {
+                        return Err(e);
+                    }
+                    debug!("PUUID={} 战绩查询失败: {}, 准备第 {}/{} 次重试", &puuid[..8.min(puuid.len())], e, retry_count + 1, max_retries);
+                }
+            }
+
+            retry_count += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
     }
 
     // ── 战利品 / 奖励 ───────────────────────────────────────────────
