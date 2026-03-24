@@ -248,12 +248,12 @@ pub fn extract_teams_from_session(
         
         if let Some(arr) = players_val {
             for p in arr {
+                // LeagueAkari 实践：优先使用 puuid，若无则使用 summonerId 作为唯一标识
                 let puuid_raw = p.get("puuid").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
                     .map(|s| s.to_owned())
                     .or_else(|| p.get("summonerId").and_then(|v| v.as_i64()).map(|id| id.to_string()));
                 
                 let Some(puuid) = puuid_raw else {
-                    tracing::warn!("选人阶段：跳过队伍 {} 中的一个玩家，因为找不到标识符", key);
                     continue;
                 };
 
@@ -262,7 +262,8 @@ pub fn extract_teams_from_session(
                 let display_name = p.get("displayName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
                 let summoner_name = p.get("summonerName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
 
-                // 优先级：GameName#Tag > DisplayName > SummonerName > "召唤师" (兜底)
+                // 优先级：GameName#Tag > DisplayName > SummonerName
+                // 在 Anonymous 模式下，DisplayName 可能是 "Summoner 1"，但 PUUID 依然是真实的
                 let name = if let Some(gn) = game_name {
                     if let Some(tl) = tag_line { format!("{}#{}", gn, tl) } else { gn.to_owned() }
                 } else if let Some(dn) = display_name {
@@ -279,17 +280,21 @@ pub fn extract_teams_from_session(
                 result.push((puuid, name, champ_id));
             }
         }
-        debug!("提取队伍 {}: {} 人", key, result.len());
         result
     };
     let my_team = extract("myTeam");
     let their_team = extract("theirTeam");
+    
+    // 额外补偿：如果 myTeam 为空，尝试从 localPlayerCellId 所在的团队提取
+    //（在某些极少数 LCU 异常状态下有效）
+    
     let my_side = session.get("myTeam").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
     let their_side = session.get("theirTeam").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
     (my_team, their_team, my_side, their_side)
 }
 
 /// 从游戏进行中 (Gameflow) Session 提取玩家。
+/// 包含了针对 LCU 数据不一致时的补偿逻辑（如 localPlayer 缺失）。
 pub fn extract_teams_from_gameflow_session(
     session: &Value,
     my_puuid: &str,
@@ -307,52 +312,74 @@ pub fn extract_teams_from_gameflow_session(
                     .map(|s| s.to_owned())
                     .or_else(|| p.get("summonerId").and_then(|v| v.as_i64()).map(|id| id.to_string()));
 
-                let Some(puuid) = puuid_raw else {
-                    tracing::warn!("对局分析：跳过队伍 {} 中的一个玩家，因为找不到标识符", key);
-                    continue;
-                };
+                let Some(puuid) = puuid_raw else { continue; };
 
+                // 优先顺序：GameName#Tag > DisplayName > "召唤师"
                 let game_name = p.get("gameName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
                 let tag_line = p.get("tagLine").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
                 let display_name = p.get("displayName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                let summoner_name = p.get("summonerName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-
+                
                 let name = if let Some(gn) = game_name {
                     if let Some(tl) = tag_line { format!("{}#{}", gn, tl) } else { gn.to_owned() }
                 } else if let Some(dn) = display_name {
                     dn.to_owned()
-                } else if let Some(sn) = summoner_name {
-                    sn.to_owned()
                 } else {
                     "召唤师".to_owned()
                 };
 
+                // 附加英雄名称标签
                 let champ_id = p.get("championId").and_then(|v| v.as_i64()).unwrap_or(0);
                 let label = if champ_id != 0 {
                     if let Some(cname) = id_name_map.get(&champ_id) { 
-                        // 如果名字是“召唤师”，则只显示 "英雄名"，否则显示 "人名(英雄名)"
-                        if name == "召唤师" {
-                            cname.clone()
-                        } else {
+                        if name == "召唤师" || name.starts_with("Summoner ") { 
+                            cname.clone() 
+                        } else { 
                             format!("{}({})", name, cname) 
                         }
-                    } else { 
-                        name 
-                    }
-                } else { 
-                    name 
-                };
+                    } else { name }
+                } else { name };
+                
                 result.push((puuid, label));
             }
         }
-        debug!("提取对局队伍 {}: {} 人", key, result.len());
         result
     };
 
-    let t1 = extract_team("teamOne");
-    let t2 = extract_team("teamTwo");
+    let mut t1 = extract_team("teamOne");
+    let mut t2 = extract_team("teamTwo");
+
+    // --- 补偿逻辑 (LeagueAkari 实践) ---
+    
+    // 1. 补全 localPlayer：LCU 的 teamOne/teamTwo 在某些特定时刻（如刚进入游戏）会漏掉自己
+    if let Some(lp) = game_data.get("localPlayer") {
+        let lp_puuid = lp.get("puuid").and_then(|v| v.as_str()).map(|s| s.to_owned());
+        if let Some(p_id) = lp_puuid {
+            if !t1.iter().any(|(p, _)| p == &p_id) && !t2.iter().any(|(p, _)| p == &p_id) {
+                let team_id = lp.get("teamId").and_then(|v| v.as_i64()).unwrap_or(0);
+                let champ_id = lp.get("championId").and_then(|v| v.as_i64()).unwrap_or(0);
+                let champ_name = id_name_map.get(&champ_id).cloned().unwrap_or_else(|| "本地召唤师".into());
+                
+                // 根据 teamId 分配 (100: TeamOne/Blue, 200: TeamTwo/Red)
+                if team_id == 100 { t1.push((p_id, champ_name)); }
+                else { t2.push((p_id, champ_name)); }
+            }
+        }
+    }
+
+    // 2. 检查人数并尝试从 session 根节点进一步补偿（针对 ARAM 或特殊模式）
+    if t1.is_empty() && t2.is_empty() {
+        // 如果 teamOne/Two 都拿不到，可能是数据结构在 session 根部
+        t1 = extract_team("myTeam");
+        t2 = extract_team("theirTeam");
+    }
+
+    // 确定哪边是我方
     let my_in_t1 = t1.iter().any(|(p, _)| p == my_puuid);
-    if my_in_t1 { (t1, t2, Some(100), Some(200)) } else { (t2, t1, Some(200), Some(100)) }
+    if my_in_t1 {
+        (t1, t2, Some(100), Some(200))
+    } else {
+        (t2, t1, Some(200), Some(100))
+    }
 }
 
 // ── 格式化输出 ────────────────────────────────────────────────────
@@ -365,7 +392,7 @@ pub fn format_premade_message(
 ) -> String {
     let side_label = |s| match s { Some(100) => "[蓝方]", Some(200) => "[红方]", _ => "" };
     
-    let fmt_t = |t: &TeamPremade, s| {
+    let fmt_t = |t: &TeamPremade, _s| {
         if t.groups.is_empty() { return None; }
         // 这里的头不再包含蓝红队字样，因为已经提到总标题了
         let head = format!("{}", t.team_name);

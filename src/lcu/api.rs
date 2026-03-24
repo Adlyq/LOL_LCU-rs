@@ -13,7 +13,7 @@ use anyhow::Result;
 use reqwest::{Client, Response};
 use serde_json::{json, Value};
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::connection::LcuCredentials;
 
@@ -530,52 +530,144 @@ impl LcuClient {
         self.send_chat_message(&conv_id, body).await
     }
 
-    // ── 战绩 ────────────────────────────────────────────────────────
+    // ── 凭据与 Token ───────────────────────────────────────────────
 
-    /// 获取指定 PUUID 的最近场次战绩（简要列表）。
-    ///
-    /// `GET /lol-match-history/v1/products/lol/{puuid}/matches?begIndex=0&endIndex={end}`
+    /// 获取 Entitlements Token (X-Riot-Entitlements-JWT)。
+    pub async fn get_entitlements_token(&self) -> Result<String, LcuApiError> {
+        let v = self.get_json("/lol-entitlements/v1/token").await?;
+        v.get("accessToken")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned())
+            .ok_or_else(|| LcuApiError::Other("未找到 entitlements token".into()))
+    }
+
+    /// 获取 RSO Access Token (Authorization: Bearer ...)。
+    pub async fn get_access_token(&self) -> Result<String, LcuApiError> {
+        let v = self.get_json("/lol-rso-auth/v1/authorization/access-token").await?;
+        v.get("token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned())
+            .ok_or_else(|| LcuApiError::Other("未找到 access token".into()))
+    }
+
+    // ── 战绩 (LCU + SGP) ───────────────────────────────────────────
+
+    /// 获取指定 PUUID 的最近场次战绩。
+    /// 策略：优先 LCU 本地缓存，失败或数据不全则尝试 SGP (Riot 远程接口)。
     pub async fn get_match_history(
         &self,
         puuid: &str,
         count: usize,
     ) -> Result<Value, LcuApiError> {
+        // 1. 尝试 LCU API (带重试逻辑，应对进入游戏初期 LCU 尚未加载完战绩的情况)
+        let lcu_res = self.get_match_history_lcu(puuid, count).await;
+        if let Ok(ref v) = lcu_res {
+            if Self::is_match_history_valid(v) {
+                return lcu_res;
+            }
+        }
+
+        // 2. 如果 LCU 战绩为空或获取失败，尝试通过 SGP 获取 (Fallback)
+        debug!("LCU 战绩为空或失败，尝试通过 SGP 获取 (PUUID={})", &puuid[..8.min(puuid.len())]);
+        match self.get_match_history_sgp(puuid, count).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                warn!("SGP 战绩获取也失败: {e}");
+                // 如果 SGP 也失败了，返回之前 LCU 的结果
+                lcu_res
+            }
+        }
+    }
+
+    /// 内部：仅通过 LCU 获取战绩。
+    async fn get_match_history_lcu(&self, puuid: &str, count: usize) -> Result<Value, LcuApiError> {
         let end = count.saturating_sub(1);
         let endpoint = format!(
             "/lol-match-history/v1/products/lol/{puuid}/matches?begIndex=0&endIndex={end}"
         );
 
         let mut retry_count = 0;
-        let max_retries = 3;
+        let max_retries = 2;
 
         loop {
-            match self.get_json(&endpoint).await {
-                Ok(v) => {
-                    // 检查是否包含 games 字段且为数组。
-                    // 某些情况下 LCU 会返回空对象或非数组，表示数据尚未就绪。
-                    let has_games = v.get("games")
-                        .map(|g| g.is_array() || (g.is_object() && g.get("games").map_or(false, |inner| inner.is_array())))
-                        .unwrap_or(false);
-
-                    if has_games || retry_count >= max_retries {
-                        if !has_games {
-                            tracing::warn!("PUUID={} 战绩查询重试次数耗尽，仍无数据", &puuid[..8.min(puuid.len())]);
-                        }
-                        return Ok(v);
-                    }
-                    tracing::info!("PUUID={} 战绩暂无数据，准备第 {}/{} 次重试", &puuid[..8.min(puuid.len())], retry_count + 1, max_retries);
-                }
-                Err(e) => {
-                    if retry_count >= max_retries {
-                        tracing::error!("PUUID={} 战绩查询失败: {}, 且已达到最大重试次数", &puuid[..8.min(puuid.len())], e);
-                        return Err(e);
-                    }
-                    tracing::info!("PUUID={} 战绩查询失败: {}, 准备第 {}/{} 次重试", &puuid[..8.min(puuid.len())], e, retry_count + 1, max_retries);
+            let res = self.get_json(&endpoint).await;
+            if let Ok(ref v) = res {
+                // 如果拿到了有效的列表（games 字段存在且有内容），则直接返回
+                if Self::is_match_history_valid(v) {
+                    return res;
                 }
             }
 
+            if retry_count >= max_retries {
+                return res;
+            }
+
             retry_count += 1;
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        }
+    }
+
+    /// 内部：通过 SGP 获取战绩。
+    /// SGP 是 Riot 的 Service Gateway 接口，LCU 也是通过它同步战绩。
+    async fn get_match_history_sgp(&self, puuid: &str, count: usize) -> Result<Value, LcuApiError> {
+        let access_token = self.get_access_token().await?;
+        let ent_token = self.get_entitlements_token().await?;
+        
+        // 自动探测 Region
+        let region = self.get_json("/riotclient/region-locale").await
+            .map(|v| v.get("region").and_then(|s| s.as_str()).unwrap_or("hn1").to_lowercase())
+            .unwrap_or_else(|_| "hn1".to_string());
+
+        // 国服环境使用通用的 BGP 代理，非国服使用 sgp.pvp.net
+        let url = if region.contains("hn") || region.contains("tj") || region.contains("sh") || region.contains("gz") {
+            format!("https://bgp.pallas.penta.qq.com/sgp/shno/v1/products/lol/player-history/v1/products/lol/{}/matches?begIndex=0&endIndex={}", 
+                puuid, count.saturating_sub(1))
+        } else {
+            format!("https://sgp.pvp.net/match-history-query/v1/products/lol/player/{}/SUMMARY?count={}", 
+                puuid, count)
+        };
+
+        let resp = self.client.get(&url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("X-Riot-Entitlements-JWT", ent_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(LcuApiError::Http {
+                status: resp.status().as_u16(),
+                method: "GET (SGP)".into(),
+                endpoint: url,
+                body: resp.text().await.unwrap_or_default(),
+            });
+        }
+
+        let mut v = resp.json::<Value>().await?;
+        
+        // 适配 LCU 格式：SGP 返回的是摘要列表，LCU 期望包裹在 { games: { games: [...] } } 中
+        // 某些 SGP 接口返回 { games: [...] }，某些直接返回数组 [...]
+        if v.is_array() {
+            v = json!({ "games": { "games": v } });
+        } else if let Some(games) = v.get_mut("games") {
+            if games.is_array() {
+                v = json!({ "games": { "games": games.take() } });
+            }
+        } else if v.get("games").is_none() {
+            // 如果既不是数组也没有 games 字段，可能是单场数据
+            v = json!({ "games": { "games": [v] } });
+        }
+
+        Ok(v)
+    }
+
+    fn is_match_history_valid(v: &Value) -> bool {
+        let games = v.get("games")
+            .and_then(|g| if g.is_array() { Some(g) } else { g.get("games") })
+            .and_then(|arr| arr.as_array());
+        
+        match games {
+            Some(arr) => !arr.is_empty(),
+            None => false,
         }
     }
 
