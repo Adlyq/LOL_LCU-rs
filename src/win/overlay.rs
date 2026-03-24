@@ -226,7 +226,23 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
     if !state.prophet.is_empty() {
         SelectObject(hdc_mem, hfont_prophet);
         for line in state.prophet.lines() {
-            draw_stroked_text(hdc_mem, line, x, y, rgb(200, 200, 200));
+            let color = if line.contains("通天代") {
+                rgb(255, 215, 0) // 金色
+            } else if line.contains("小代") {
+                rgb(255, 100, 255) // 紫红色
+            } else if line.contains("上等马") {
+                rgb(255, 80, 80) // 浅红
+            } else if line.contains("中等马") {
+                rgb(100, 255, 100) // 浅绿
+            } else if line.contains("获取失败") || line.contains("加载中") {
+                rgb(120, 120, 120) // 暗灰
+            } else if line.starts_with('[') {
+                rgb(0, 255, 255) // 青色标题
+            } else {
+                rgb(200, 200, 200) // 默认淡灰
+            };
+            
+            draw_stroked_text(hdc_mem, line, x, y, color);
             y += 24; // 调大行高
         }
     }

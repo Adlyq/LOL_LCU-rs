@@ -75,7 +75,7 @@ pub async fn handle_champ_select(
                             tracing::info!("玩家 {} 战绩拉取成功，共 {} 场", name_cc, matches.len());
                             if let Some(rating) = prophet::calculate_player_rating(&puuid_cc, matches) {
                                 let grade = prophet::get_grade_name(rating.score);
-                                res = format!("{} {} 评分:{:.0} KDA:{:.1}", grade, name_cc, rating.score, rating.avg_kda);
+                                res = format!("{} {} 评分:{:.0} KDA:{:.1} 胜率:{:.0}%", grade, name_cc, rating.score, rating.avg_kda, rating.win_rate * 100.0);
                                 tracing::info!("玩家 {} 评分计算完成: {:.0}", name_cc, rating.score);
                             } else {
                                 tracing::warn!("玩家 {} 评分计算返回 None", name_cc);
