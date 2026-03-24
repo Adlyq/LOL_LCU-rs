@@ -213,6 +213,10 @@ impl MainLoop {
                 if !s.premade_ingame_done {
                     s.premade_ingame_done = true;
                     true
+                } else if self.my_scores.is_empty() && self.their_scores.is_empty() {
+                    // 特殊情况：如果状态标记已完成但缓存为空（如刚启动同步时），也触发分析
+                    debug!("检测到评分缓存为空，补发游戏内分析请求");
+                    true
                 } else {
                     false
                 }
