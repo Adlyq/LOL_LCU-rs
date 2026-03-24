@@ -93,11 +93,16 @@ pub async fn handle_gameflow(
                         let mut init_msg = String::new();
                         let my_init: Vec<String> = my_team.iter().map(|(_, name)| format!("-- {} 评分:加载中...", name)).collect();
                         let their_init: Vec<String> = their_team.iter().map(|(_, name)| format!("-- {} 评分:加载中...", name)).collect();
-                        init_msg.push_str(&format!("[我方评分]\n{}\n", my_init.join("\n")));
-                        init_msg.push_str(&format!("\n[对方评分]\n{}\n", their_init.join("\n")));
+                        
+                        let my_label = if my_side == Some(100) { "[蓝方评分]" } else { "[红方评分]" };
+                        let their_label = if their_side == Some(100) { "[蓝方评分]" } else { "[红方评分]" };
+
+                        init_msg.push_str(&format!("{}\n{}\n", my_label, my_init.join("\n")));
+                        init_msg.push_str(&format!("\n{}\n{}\n", their_label, their_init.join("\n")));
                         let _ = tx2.send(OverlayCmd::UpdateProphet(init_msg)).await;
                         
                         let mut my_set = JoinSet::new();
+                        // ... (此处省略中间 spawn 循环逻辑)
                         for (idx, (puuid, name)) in my_team.iter().enumerate() {
                             let api_cc = api2.clone();
                             let puuid_cc = puuid.clone();
@@ -177,13 +182,13 @@ pub async fn handle_gameflow(
                                 let my_lines: Vec<String> = my_team_c.iter().enumerate().map(|(i, (_, name))| {
                                     my_prophet_results[i].clone().unwrap_or_else(|| format!("-- {} 评分:加载中...", name))
                                 }).collect();
-                                prophet_msg.push_str(&format!("[我方评分]\n{}\n", my_lines.join("\n")));
+                                prophet_msg.push_str(&format!("{}\n{}\n", my_label, my_lines.join("\n")));
 
                                 let their_lines: Vec<String> = their_team_c.iter().enumerate().map(|(i, (_, name))| {
                                     their_prophet_results[i].clone().unwrap_or_else(|| format!("-- {} 评分:加载中...", name))
                                 }).collect();
                                 if !their_lines.is_empty() {
-                                    prophet_msg.push_str(&format!("\n[对方评分]\n{}\n", their_lines.join("\n")));
+                                    prophet_msg.push_str(&format!("\n{}\n{}\n", their_label, their_lines.join("\n")));
                                 }
                                 let _ = tx2_c.send(OverlayCmd::UpdateProphet(prophet_msg)).await;
                             }

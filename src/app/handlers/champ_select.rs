@@ -56,11 +56,13 @@ pub async fn handle_champ_select(
             // 立即发送一次初始占位信息
             let mut init_msg = String::new();
             let my_init: Vec<String> = my_raw.iter().map(|(_, name, _)| format!("-- {} 评分:加载中...", name)).collect();
-            init_msg.push_str(&format!("[我方评分]\n{}\n", my_init.join("\n")));
+            let my_label = if my_side == Some(100) { "[蓝方评分]" } else { "[红方评分]" };
+            init_msg.push_str(&format!("{}\n{}\n", my_label, my_init.join("\n")));
             let _ = tx_c.send(OverlayCmd::UpdateProphet(init_msg)).await;
 
             let mut my_prophet_results = vec![None; my_raw.len()];
             let mut my_set = JoinSet::new();
+            // ... (省略 spawn 逻辑)
             for (idx, (puuid, name, _)) in my_raw.iter().enumerate() {
                 let api_cc = api_c.clone();
                 let puuid_cc = puuid.clone();
@@ -103,7 +105,7 @@ pub async fn handle_champ_select(
                 let my_lines: Vec<String> = my_raw.iter().enumerate().map(|(i, (_, name, _))| {
                     my_prophet_results[i].clone().unwrap_or_else(|| format!("-- {} 评分:加载中...", name))
                 }).collect();
-                final_msg.push_str(&format!("[我方评分]\n{}\n", my_lines.join("\n")));
+                final_msg.push_str(&format!("{}\n{}\n", my_label, my_lines.join("\n")));
                 let _ = tx_c.send(OverlayCmd::UpdateProphet(final_msg)).await;
             }
         });

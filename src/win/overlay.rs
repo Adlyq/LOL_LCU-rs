@@ -219,7 +219,17 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
     if !state.connection.is_empty() { draw_stroked_text(hdc_mem, &state.connection, x, y, rgb(0, 255, 0)); y += 32; }
     
     if !state.premade.is_empty() {
-        for line in state.premade.lines() { draw_stroked_text(hdc_mem, line, x, y, rgb(255, 255, 255)); y += 26; }
+        for line in state.premade.lines() { 
+            let color = if line.contains("[蓝方]") {
+                rgb(100, 149, 237) // 玉米色蓝
+            } else if line.contains("[红方]") {
+                rgb(255, 69, 0) // 橙红色
+            } else {
+                rgb(255, 255, 255) // 白色
+            };
+            draw_stroked_text(hdc_mem, line, x, y, color); 
+            y += 26; 
+        }
     }
 
     // 绘制评分信息 (Prophet)
@@ -236,8 +246,12 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
                 rgb(100, 255, 100) // 浅绿
             } else if line.contains("获取失败") || line.contains("加载中") {
                 rgb(120, 120, 120) // 暗灰
+            } else if line.contains("[蓝方]") {
+                rgb(100, 149, 237) // 蓝色方评分标题
+            } else if line.contains("[红方]") {
+                rgb(255, 69, 0) // 红色方评分标题
             } else if line.starts_with('[') {
-                rgb(0, 255, 255) // 青色标题
+                rgb(0, 255, 255) // 其他青色标题
             } else {
                 rgb(200, 200, 200) // 默认淡灰
             };

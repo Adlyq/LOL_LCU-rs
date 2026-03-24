@@ -363,22 +363,26 @@ pub fn format_premade_message(
     my_side: Option<u32>,
     their_side: Option<u32>,
 ) -> String {
-    let side_label = |s| match s { Some(100) => "🔵蓝队", Some(200) => "🔴红队", _ => "" };
+    let side_label = |s| match s { Some(100) => "[蓝方]", Some(200) => "[红方]", _ => "" };
     
     let fmt_t = |t: &TeamPremade, s| {
         if t.groups.is_empty() { return None; }
-        let head = format!("{} {}", t.team_name, side_label(s));
+        // 这里的头不再包含蓝红队字样，因为已经提到总标题了
+        let head = format!("{}", t.team_name);
         let g_strs: Vec<String> = t.groups.iter().map(|g| format!("  {}黑（{}局）：{}", g.summoner_names.len(), g.times, g.summoner_names.join(" / "))).collect();
         Some(format!("{}：\n{}", head, g_strs.join("\n")))
     };
 
-    let mut parts = vec!["[对局组黑分析]".to_owned()];
+    // 标题始终带上我方的阵营标识
+    let title = format!("[对局组黑分析] {}", side_label(my_side));
+    let mut parts = vec![title];
+    
     if let Some(m) = fmt_t(my_team, my_side) { parts.push(m); }
     if let Some(t) = fmt_t(their_team, their_side) { parts.push(t); }
 
     if parts.len() == 1 {
-        // 如果双方都没组黑，显示一个简洁提示
-        return "[对局组黑分析]\n纯路人局".to_owned();
+        // 如果双方都没组黑
+        return format!("{}\n纯路人局", parts[0]);
     }
 
     parts.join("\n")
