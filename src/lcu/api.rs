@@ -55,7 +55,7 @@ pub mod gameflow {
 /// LCU HTTP API 客户端。
 ///
 /// `Clone` 开销极小（reqwest::Client 内部是 Arc）。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LcuClient {
     client: Client,
     base_url: String,

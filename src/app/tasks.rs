@@ -5,17 +5,18 @@
 
 use std::time::Duration;
 use tokio::time::sleep;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::lcu::api::LcuClient;
 use crate::app::config::SharedConfig;
-use crate::win::overlay::{OverlayCmd, OverlaySender};
+use crate::app::event::AppEvent;
 
 /// 窗口比例修复循环：定期检查 LCU 缩放并触发修复逻辑。
-pub async fn window_fix_loop(api: LcuClient, overlay_tx: OverlaySender) {
+pub async fn window_fix_loop(api: LcuClient, event_tx: mpsc::Sender<AppEvent>) {
     loop {
         if let Ok(zoom) = api.get_riotclient_zoom_scale().await {
-            let _ = overlay_tx.send(OverlayCmd::AutoFixWindow(zoom, false)).await;
+            let _ = event_tx.send(AppEvent::RequestWindowFix { zoom, forced: false }).await;
         }
         // [AI PROMPT]: 保持 1500ms 间隔与 fix-lcu-window 自动模式一致，严禁修改。
         sleep(Duration::from_millis(1500)).await;

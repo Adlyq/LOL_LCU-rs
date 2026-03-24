@@ -8,6 +8,8 @@
 use std::thread;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicIsize, Ordering};
+use tracing::{info, warn, debug, trace};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
@@ -18,6 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Shell::*;
 
 use crate::app::config::SharedConfig;
+use crate::app::event::{AppEvent, TrayAction};
+use crate::app::viewmodel::ViewModel;
 use crate::win::winapi::{self, to_wide};
 
 // ── 布局常量 (1920x1080 模板) ──────────────────────────────────
@@ -34,7 +38,6 @@ const BENCH_SLOT_COUNT: usize = 10;
 // ── 常量定义 ─────────────────────────────────────────────────────
 
 const WM_TRAY_ICON: u32 = WM_USER + 100;
-const WM_CMD_WAKEUP: u32 = WM_USER + 101;
 const TRAY_UID: u32 = 1;
 
 const ID_QUIT: usize = 1001;
@@ -67,59 +70,36 @@ impl FRect {
     fn bottom(&self) -> f64 { self.y + self.h }
 }
 
-// ── 指令类型 ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub enum OverlayCmd {
-    Show,
-    Hide,
-    #[allow(dead_code)]
-    ToggleHud(Duration),      
-    ClearHud,                 
-    UpdateHud(String, String),
-    UpdateProphet(String),    
-    ShowBench(bool),          
-    SetSelectedSlot(usize),   
-    ClearSelectedSlot,        
-    AutoFixWindow(f64, bool), 
-    Quit,
-}
-
-#[derive(Debug, Clone)]
-pub enum TrayAction {
-    ReloadUx,
-    PlayAgain,
-    FindForgottenLoot,
-    FixWindow,                
-}
-
 #[derive(Clone)]
 pub struct OverlaySender {
-    tx: tokio::sync::mpsc::Sender<OverlayCmd>,
-    hud_hwnd: SendHwnd,
+    _tx: tokio::sync::mpsc::Sender<AppEvent>,
+    _hud_hwnd: SendHwnd,
 }
 
-impl OverlaySender {
-    pub async fn send(&self, cmd: OverlayCmd) -> Result<(), tokio::sync::mpsc::error::SendError<OverlayCmd>> {
-        let tx = self.tx.clone();
-        tx.send(cmd).await?;
-        unsafe { let _ = PostMessageW(self.hud_hwnd.0, WM_CMD_WAKEUP, WPARAM(0), LPARAM(0)); }
-        Ok(())
-    }
+pub fn spawn_overlay_thread(
+    config: SharedConfig,
+    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
+    vm_rx: tokio::sync::watch::Receiver<ViewModel>,
+) -> OverlaySender {
+    let (hwnd_tx, hwnd_rx) = std_mpsc::channel();
+    let event_tx_c = event_tx.clone();
+
+    info!("正在启动 Overlay 线程...");
+    thread::spawn(move || {
+        overlay_message_loop(config, event_tx_c, vm_rx, hwnd_tx);
+    });
+
+    let hud_hwnd = hwnd_rx.recv().expect("无法获取 Overlay HWND");
+    OverlaySender { _tx: event_tx, _hud_hwnd: hud_hwnd }
 }
 
 // ── 状态结构 ─────────────────────────────────────────────────────
 
 struct WndState {
-    connection: String,
-    premade: String,
-    prophet: String,
+    vm: ViewModel,
     config: SharedConfig,
-    action_tx: tokio::sync::mpsc::Sender<TrayAction>,
-    click_tx: tokio::sync::mpsc::Sender<usize>,
+    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
     
-    show_bench: bool,
-    selected_slot: Option<usize>,
     win_w: i32,
     win_h: i32,
 }
@@ -141,24 +121,24 @@ fn get_bench_container_rect(win_w: i32, win_h: i32) -> FRect {
     }
 }
 
-fn get_slot_rect(index: usize, count: usize, container: FRect, win_w: i32, win_h: i32) -> FRect {
+fn get_slot_rect(index: usize, _count: usize, container: FRect, win_w: i32, win_h: i32) -> FRect {
     let scale_x = win_w as f64 / TEMPLATE_W;
     let scale_y = win_h as f64 / TEMPLATE_H;
     let scale = f64::min(scale_x, scale_y);
     let slot_w = SLOT_SIZE * scale;
     let slot_h = SLOT_SIZE * scale;
     let edge_inset = f64::max(0.0, 1.5 * scale);
-    let avail_w = f64::max(1.0, container.w - 2.0 * edge_inset);
-    let gap = if count <= 1 { 0.0 } else {
-        f64::max(0.0, (avail_w - slot_w * count as f64) / (count - 1) as f64)
-    };
-    let x = container.x + edge_inset + index as f64 * (slot_w + gap);
-    let y = container.y + (container.h - slot_h) / 2.0;
-    FRect { x, y, w: slot_w, h: slot_h }
+    
+    FRect {
+        x: container.x + (index as f64 * (slot_w + edge_inset)),
+        y: container.y,
+        w: slot_w,
+        h: slot_h,
+    }
 }
 
 fn hit_slot(px: f64, py: f64, state: &WndState) -> Option<usize> {
-    if !state.show_bench { return None; }
+    if !state.vm.hud2_visible { return None; }
     let container = get_bench_container_rect(state.win_w, state.win_h);
     if !container.contains(px, py) { return None; }
     for i in 0..BENCH_SLOT_COUNT {
@@ -172,6 +152,7 @@ fn hit_slot(px: f64, py: f64, state: &WndState) -> Option<usize> {
 // ── 绘制逻辑 ─────────────────────────────────────────────────────
 
 unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
+    trace!("重绘 HUD1...");
     let mut rect = RECT::default();
     let _ = GetWindowRect(hwnd, &mut rect);
     let win_w = rect.right - rect.left;
@@ -191,74 +172,40 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
     std::ptr::write_bytes(bits_ptr, 0, (win_w * win_h * 4) as usize);
 
     let face_name = to_wide("Microsoft YaHei");
-    let hfont = CreateFontW(
-        22, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0, 
-        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, 
-        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, 
-        (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr())
-    );
-    let hfont_small = CreateFontW(
-        16, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, 
-        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, 
-        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, 
-        (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr())
-    );
-    // 专门为 Prophet 评分准备的字体 (调大字号)
-    let hfont_prophet = CreateFontW(
-        20, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0, 
-        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, 
-        CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, 
-        (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr())
-    );
+    let hfont = CreateFontW(22, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0, DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr()));
+    let hfont_small = CreateFontW(16, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr()));
+    let hfont_prophet = CreateFontW(20, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0, DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32, (VARIABLE_PITCH.0 | FF_DONTCARE.0) as u32, PCWSTR(face_name.as_ptr()));
 
     let old_font = SelectObject(hdc_mem, hfont);
     SetBkMode(hdc_mem, TRANSPARENT);
     
     let mut y = 40; 
     let x = 10;
-    if !state.connection.is_empty() { draw_stroked_text(hdc_mem, &state.connection, x, y, rgb(0, 255, 0)); y += 32; }
     
-    if !state.premade.is_empty() {
-        for line in state.premade.lines() { 
-            let color = if line.contains("[蓝方]") {
-                rgb(100, 149, 237) // 玉米色蓝
-            } else if line.contains("[红方]") {
-                rgb(255, 69, 0) // 橙红色
-            } else {
-                rgb(255, 255, 255) // 白色
-            };
-            draw_stroked_text(hdc_mem, line, x, y, color); 
-            y += 26; 
-        }
+    if !state.vm.hud1_title.is_empty() {
+        draw_stroked_text(hdc_mem, &state.vm.hud1_title, x, y, rgb(0, 255, 0));
+        y += 32;
     }
+    
+    for line in &state.vm.hud1_lines {
+        let color = if line.contains("通天代") { rgb(255, 215, 0) }
+            else if line.contains("小代") { rgb(255, 100, 255) }
+            else if line.contains("上等马") { rgb(255, 80, 80) }
+            else if line.contains("中等马") { rgb(100, 255, 100) }
+            else if line.contains("获取失败") || line.contains("加载中") { rgb(120, 120, 120) }
+            else if line.contains("[蓝方]") || line.contains("[我方评分]") { rgb(100, 149, 237) }
+            else if line.contains("[红方]") || line.contains("[敌方评分]") { rgb(255, 69, 0) }
+            else if line.starts_with('[') { rgb(0, 255, 255) }
+            else { rgb(200, 200, 200) };
 
-    // 绘制评分信息 (Prophet)
-    if !state.prophet.is_empty() {
-        SelectObject(hdc_mem, hfont_prophet);
-        for line in state.prophet.lines() {
-            let color = if line.contains("通天代") {
-                rgb(255, 215, 0) // 金色
-            } else if line.contains("小代") {
-                rgb(255, 100, 255) // 紫红色
-            } else if line.contains("上等马") {
-                rgb(255, 80, 80) // 浅红
-            } else if line.contains("中等马") {
-                rgb(100, 255, 100) // 浅绿
-            } else if line.contains("获取失败") || line.contains("加载中") {
-                rgb(120, 120, 120) // 暗灰
-            } else if line.contains("[蓝方]") {
-                rgb(100, 149, 237) // 蓝色方评分标题
-            } else if line.contains("[红方]") {
-                rgb(255, 69, 0) // 红色方评分标题
-            } else if line.starts_with('[') {
-                rgb(0, 255, 255) // 其他青色标题
-            } else {
-                rgb(200, 200, 200) // 默认淡灰
-            };
-            
-            draw_stroked_text(hdc_mem, line, x, y, color);
-            y += 24; // 调大行高
+        if line.contains("评分:") {
+            SelectObject(hdc_mem, hfont_prophet);
+        } else {
+            SelectObject(hdc_mem, hfont);
         }
+            
+        draw_stroked_text(hdc_mem, line, x, y, color);
+        y += 24;
     }
 
     let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, (win_w * win_h * 4) as usize);
@@ -283,6 +230,7 @@ unsafe fn paint_hud(hwnd: HWND, state: &WndState) {
 }
 
 unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
+    trace!("重绘 HUD2 (板凳席)...");
     let mut rect = RECT::default();
     let _ = GetWindowRect(hwnd, &mut rect);
     let win_w = rect.right - rect.left;
@@ -300,35 +248,30 @@ unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     let hbm = CreateDIBSection(hdc_mem, &BITMAPINFO { bmiHeader: bi, ..Default::default() }, DIB_RGB_COLORS, &mut bits_ptr, HANDLE::default(), 0).unwrap();
     let old_bm = SelectObject(hdc_mem, hbm);
     
-    // 初始化全透明
     std::ptr::write_bytes(bits_ptr, 0, (win_w * win_h * 4) as usize);
     let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (win_w * win_h) as usize);
 
-    if state.show_bench {
+    if state.vm.hud2_visible {
         let container = get_bench_container_rect(win_w, win_h);
         let scale_y = win_h as f64 / TEMPLATE_H;
         
-        // 1. 填充容器背景 (Alpha=2, 近似透明但可捕获鼠标)
         fill_rect_alpha(pixels, win_w, win_h, container, 0, 0, 0, 2);
         
-        // 2. 绘制容器边框
         let pen_gray = CreatePen(PS_SOLID, 1, rgb(128, 128, 128));
         let old_pen = SelectObject(hdc_mem, pen_gray);
         let old_brush = SelectObject(hdc_mem, GetStockObject(NULL_BRUSH));
-        let _ = round_rect(hdc_mem, container, (5.0 * scale_y) as i32);
+        let _ = RoundRect(hdc_mem, container.x as i32, container.y as i32, container.right() as i32, container.bottom() as i32, (10.0 * scale_y) as i32, (10.0 * scale_y) as i32);
         
-        // 3. 绘制槽位
         let pen_slot = CreatePen(PS_SOLID, 1, rgb(160, 160, 160));
         SelectObject(hdc_mem, pen_slot);
         for i in 0..BENCH_SLOT_COUNT {
             let sr = get_slot_rect(i, BENCH_SLOT_COUNT, container, win_w, win_h);
-            // 选中槽位填充绿色遮罩，否则填充 Alpha=2 以捕获鼠标
-            if state.selected_slot == Some(i) {
+            if state.vm.hud2_selected_slot == Some(i) {
                 fill_rect_alpha(pixels, win_w, win_h, sr, 130, 255, 130, 65);
             } else {
                 fill_rect_alpha(pixels, win_w, win_h, sr, 0, 0, 0, 2);
             }
-            let _ = round_rect(hdc_mem, sr, (4.0 * scale_y) as i32);
+            let _ = RoundRect(hdc_mem, sr.x as i32, sr.y as i32, sr.right() as i32, sr.bottom() as i32, (8.0 * scale_y) as i32, (8.0 * scale_y) as i32);
         }
         
         SelectObject(hdc_mem, old_pen);
@@ -349,7 +292,6 @@ unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     ReleaseDC(HWND::default(), hdc_screen);
 }
 
-/// 填充矩形区域的 Alpha 值（使用预乘颜色）。
 fn fill_rect_alpha(pixels: &mut [u32], win_w: i32, win_h: i32, rect: FRect, r: u8, g: u8, b: u8, a: u8) {
     let x0 = rect.x.round() as i32;
     let y0 = rect.y.round() as i32;
@@ -369,25 +311,20 @@ fn fill_rect_alpha(pixels: &mut [u32], win_w: i32, win_h: i32, rect: FRect, r: u
     }
 }
 
-unsafe fn round_rect(hdc: HDC, r: FRect, rad: i32) -> BOOL {
-    RoundRect(hdc, r.x as i32, r.y as i32, r.right() as i32, r.bottom() as i32, rad * 2, rad * 2)
-}
-
 unsafe fn draw_stroked_text(hdc: HDC, text: &str, x: i32, y: i32, color: COLORREF) {
     let wide_text = to_wide(text);
-    let slice = &wide_text[..wide_text.len() - 1]; // 排除空终止符
+    let slice = &wide_text[..wide_text.len() - 1]; 
     SetTextColor(hdc, rgb(10, 10, 10));
     for dx in -2..=2 {
         for dy in -2..=2 {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
+            if dx == 0 && dy == 0 { continue; }
             let _ = TextOutW(hdc, x + dx, y + dy, slice);
         }
     }
     SetTextColor(hdc, color);
     let _ = TextOutW(hdc, x, y, slice);
 }
+
 // ── 窗口过程 ─────────────────────────────────────────────────────
 
 unsafe extern "system" fn tray_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -430,7 +367,7 @@ unsafe extern "system" fn bench_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, l
                 let cx = (lparam.0 & 0xFFFF) as i16 as i32;
                 let cy = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 if let Some(idx) = hit_slot(cx as f64, cy as f64, state) {
-                    let _ = state.click_tx.try_send(idx);
+                    let _ = state.event_tx.try_send(AppEvent::BenchClick(idx));
                 }
             }
             LRESULT(0)
@@ -481,142 +418,101 @@ unsafe fn handle_menu_command(hwnd: HWND, id: usize) {
     if ptr.is_null() { return; }
     let state = &*ptr;
     match id {
-        ID_FIX_WINDOW => { let _ = state.action_tx.try_send(TrayAction::FixWindow); }
-        ID_FIND_LOOT => { let _ = state.action_tx.try_send(TrayAction::FindForgottenLoot); }
-        ID_PLAY_AGAIN => { let _ = state.action_tx.try_send(TrayAction::PlayAgain); }
-        ID_RELOAD_UX => { let _ = state.action_tx.try_send(TrayAction::ReloadUx); }
-        ID_AUTO_ACCEPT => { let mut c = state.config.lock(); c.auto_accept_enabled = !c.auto_accept_enabled; c.save(); }
-        ID_AUTO_HONOR => { let mut c = state.config.lock(); c.auto_honor_skip = !c.auto_honor_skip; c.save(); }
-        ID_PREMADE_CHAMP => { let mut c = state.config.lock(); c.premade_champ_select = !c.premade_champ_select; c.save(); }
-        ID_MEMORY_MONITOR => { let mut c = state.config.lock(); c.memory_monitor = !c.memory_monitor; c.save(); }
-        ID_QUIT => { std::process::exit(0); }
+        ID_FIX_WINDOW => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::FixWindow)); }
+        ID_FIND_LOOT => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::FindForgottenLoot)); }
+        ID_PLAY_AGAIN => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::PlayAgain)); }
+        ID_RELOAD_UX => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::ReloadUx)); }
+        ID_AUTO_ACCEPT => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::ToggleAutoAccept)); }
+        ID_AUTO_HONOR => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::ToggleAutoHonor)); }
+        ID_PREMADE_CHAMP => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::TogglePremadeChamp)); }
+        ID_MEMORY_MONITOR => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::ToggleMemoryMonitor)); } 
+        ID_QUIT => { let _ = state.event_tx.try_send(AppEvent::TrayAction(TrayAction::Exit)); }
         _ => {}
     }
 }
 
-pub fn spawn_overlay_thread(
-    config: SharedConfig,
-    action_tx: tokio::sync::mpsc::Sender<TrayAction>,
-    click_tx: tokio::sync::mpsc::Sender<usize>,
-) -> OverlaySender {
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<OverlayCmd>(256);
-    let (hwnd_tx, hwnd_rx) = std_mpsc::channel::<SendHwnd>();
-    thread::Builder::new().name("overlay-win32".to_owned()).spawn(move || {
-        overlay_message_loop(cmd_rx, hwnd_tx, action_tx, click_tx, config);
-    }).expect("启动 overlay 线程失败");
-    let hud_hwnd = hwnd_rx.recv().expect("无法获取 HUD 窗口句柄");
-    OverlaySender { tx: cmd_tx, hud_hwnd }
-}
+// ── 核心消息循环 ─────────────────────────────────────────────
 
-use std::sync::atomic::{AtomicPtr, Ordering};
-
-// 静态变量：用于 Hook 线程向 UI 线程异步发送唤醒信号
-static UI_HWND: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
-static mut KEYBOARD_HOOK: HHOOK = HHOOK(std::ptr::null_mut());
-
-/// 键盘钩子线程：专门负责极速响应按键事件，不执行任何耗时任务
-fn keyboard_hook_loop() {
-    let hinstance = unsafe { GetModuleHandleW(None).unwrap() };
-    unsafe {
-        KEYBOARD_HOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), hinstance, 0)
-            .expect("安装键盘钩子失败");
-        
-        // 维持独立的最简消息泵，确保钩子调用不被 UI 线程阻塞
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        
-        let _ = UnhookWindowsHookEx(KEYBOARD_HOOK);
-    }
-}
-
-const WM_HOTKEY_F1: u32 = WM_USER + 102;
-
-unsafe extern "system" fn keyboard_hook_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    // 改为响应 WM_KEYUP，并投递专用的热键消息
-    if ncode >= 0 && wparam.0 as u32 == WM_KEYUP {
-        let kb = *(lparam.0 as *const KBDLLHOOKSTRUCT);
-        if kb.vkCode == VK_F1.0 as u32 {
-            let target = UI_HWND.load(Ordering::SeqCst);
-            if !target.is_null() {
-                let _ = PostMessageW(HWND(target), WM_HOTKEY_F1, WPARAM(0), LPARAM(0));
-            }
-        }
-    }
-    CallNextHookEx(KEYBOARD_HOOK, ncode, wparam, lparam)
-}
+static UI_HWND: AtomicIsize = AtomicIsize::new(0);
+static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 fn overlay_message_loop(
-    mut cmd_rx: tokio::sync::mpsc::Receiver<OverlayCmd>,
-    hwnd_tx: std_mpsc::Sender<SendHwnd>,
-    action_tx: tokio::sync::mpsc::Sender<TrayAction>,
-    click_tx: tokio::sync::mpsc::Sender<usize>,
     config: SharedConfig,
+    event_tx: tokio::sync::mpsc::Sender<AppEvent>,
+    mut vm_rx: tokio::sync::watch::Receiver<ViewModel>,
+    hwnd_tx: std_mpsc::Sender<SendHwnd>,
 ) {
-    let hinstance = unsafe { GetModuleHandleW(None).unwrap() };
+    let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None).unwrap().into() };
     
-    let hud_class_w = to_wide("LOL_LCU_HUD");
-    let hud_wc = WNDCLASSW { lpfnWndProc: Some(hud_wnd_proc), hInstance: hinstance.into(), lpszClassName: PCWSTR(hud_class_w.as_ptr()), ..Default::default() };
-    unsafe { RegisterClassW(&hud_wc); }
+    let hud_class = to_wide("LOL_HUD_CLASS");
+    let mut wc = WNDCLASSW::default();
+    wc.lpfnWndProc = Some(hud_wnd_proc);
+    wc.hInstance = hinstance;
+    wc.lpszClassName = PCWSTR(hud_class.as_ptr());
+    wc.hCursor = unsafe { LoadCursorW(None, IDC_ARROW).unwrap() };
+    unsafe { RegisterClassW(&wc); }
 
-    let bench_class_w = to_wide("LOL_LCU_BENCH");
-    let bench_wc = WNDCLASSW { lpfnWndProc: Some(bench_wnd_proc), hInstance: hinstance.into(), lpszClassName: PCWSTR(bench_class_w.as_ptr()), ..Default::default() };
-    unsafe { RegisterClassW(&bench_wc); }
+    let bench_class = to_wide("LOL_BENCH_CLASS");
+    wc.lpfnWndProc = Some(bench_wnd_proc);
+    wc.lpszClassName = PCWSTR(bench_class.as_ptr());
+    unsafe { RegisterClassW(&wc); }
 
-    let tray_class_w = to_wide("LOL_LCU_TRAY");
-    let tray_wc = WNDCLASSW { lpfnWndProc: Some(tray_wnd_proc), hInstance: hinstance.into(), lpszClassName: PCWSTR(tray_class_w.as_ptr()), ..Default::default() };
-    unsafe { RegisterClassW(&tray_wc); }
+    let tray_class = to_wide("LOL_TRAY_CLASS");
+    wc.lpfnWndProc = Some(tray_wnd_proc);
+    wc.lpszClassName = PCWSTR(tray_class.as_ptr());
+    unsafe { RegisterClassW(&wc); }
 
     let hud_hwnd = unsafe {
-        CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-            PCWSTR(hud_class_w.as_ptr()), PCWSTR(hud_class_w.as_ptr()), WS_POPUP,
-            0, 0, 1200, 1200, None, None, hinstance, None).unwrap()
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            PCWSTR(hud_class.as_ptr()), PCWSTR(to_wide("LOL_HUD").as_ptr()),
+            WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+            None, None, hinstance, None
+        ).unwrap()
     };
 
     let bench_hwnd = unsafe {
-        CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            PCWSTR(bench_class_w.as_ptr()), PCWSTR(bench_class_w.as_ptr()), WS_POPUP,
-            0, 0, 1920, 1080, None, None, hinstance, None).unwrap()
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            PCWSTR(bench_class.as_ptr()), PCWSTR(to_wide("LOL_BENCH").as_ptr()),
+            WS_POPUP, 0, 0, 1, 1, None, None, hinstance, None
+        ).unwrap()
     };
 
     let tray_hwnd = unsafe {
-        CreateWindowExW(Default::default(), PCWSTR(tray_class_w.as_ptr()), PCWSTR(tray_class_w.as_ptr()),
-            Default::default(), 0, 0, 0, 0, HWND_MESSAGE, None, hinstance, None).unwrap()
+        CreateWindowExW(
+            WS_EX_NOACTIVATE, PCWSTR(tray_class.as_ptr()), PCWSTR(to_wide("LOL_TRAY").as_ptr()),
+            WS_POPUP, 0, 0, 0, 0, None, None, hinstance, None
+        ).unwrap()
     };
 
-    let state = Box::new(WndState {
-        connection: "等待连接...".to_owned(), premade: String::new(), prophet: String::new(), config, action_tx, click_tx,
-        show_bench: false, selected_slot: None, win_w: 1920, win_h: 1080,
-    });
-    let state_ptr = Box::into_raw(state);
+    let state = Box::into_raw(Box::new(WndState {
+        vm: ViewModel::default(),
+        config: config.clone(),
+        event_tx: event_tx.clone(),
+        win_w: 1, win_h: 1,
+    }));
+
     unsafe {
-        SetWindowLongPtrW(hud_hwnd, GWLP_USERDATA, state_ptr as isize);
-        SetWindowLongPtrW(bench_hwnd, GWLP_USERDATA, state_ptr as isize);
-        SetWindowLongPtrW(tray_hwnd, GWLP_USERDATA, state_ptr as isize);
+        SetWindowLongPtrW(hud_hwnd, GWLP_USERDATA, state as isize);
+        SetWindowLongPtrW(bench_hwnd, GWLP_USERDATA, state as isize);
+        SetWindowLongPtrW(tray_hwnd, GWLP_USERDATA, state as isize);
         
-        let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE);
         add_tray_icon(tray_hwnd);
 
-        // 核心重构：将键盘钩子注入独立的高优先级线程
-        UI_HWND.store(hud_hwnd.0, Ordering::SeqCst);
+        UI_HWND.store(hud_hwnd.0 as isize, Ordering::SeqCst);
+        let event_tx_hook = event_tx.clone();
         thread::Builder::new().name("keyboard-hook".to_owned()).spawn(move || {
-            keyboard_hook_loop();
+            keyboard_hook_loop(event_tx_hook);
         }).expect("启动监控线程失败");
     }
     let _ = hwnd_tx.send(SendHwnd(hud_hwnd));
 
     let mut last_sync = Instant::now();
-    let mut last_rect = RECT::default();
-    let mut hud1_visible = true;
-    let mut target_hwnd: Option<HWND>;
     let mut force_sync = true; 
-    let mut toggle_hide_at: Option<Instant> = None;
     let mut needs_paint_hud = false;
     let mut needs_paint_bench = false;
 
-    // 设置定时器：每 30ms 驱动位置同步和指令轮询（代替忙等）
     unsafe { SetTimer(hud_hwnd, 1, 30, None); }
 
     let mut msg = MSG::default();
@@ -626,129 +522,54 @@ fn overlay_message_loop(
             DispatchMessageW(&msg);
         }
 
-        // --- 处理 F1 热键信号 (专用消息) ---
-        if msg.message == WM_HOTKEY_F1 {
-            if hud1_visible {
-                hud1_visible = false;
-                toggle_hide_at = None;
-                unsafe { let _ = ShowWindow(hud_hwnd, SW_HIDE); }
-            } else {
-                hud1_visible = true;
-                toggle_hide_at = Some(Instant::now() + Duration::from_secs(30));
-                needs_paint_hud = true;
-                force_sync = true;
-                unsafe { let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE); }
-            }
-        }
-
-        // --- 信号消息：WM_CMD_WAKEUP 仅用于唤醒 GetMessageW 以处理指令队列 ---
-        if msg.message == WM_CMD_WAKEUP {}
-
-        // --- 定时业务逻辑 ---
         if msg.message == WM_TIMER && msg.wParam.0 == 1 {
-            // 1. 处理指令队列
-            while let Ok(cmd) = cmd_rx.try_recv() {
-                let s = unsafe { &mut *state_ptr };
-                match cmd {
-                    OverlayCmd::Show => {
-                        hud1_visible = true;
-                        toggle_hide_at = None;
-                        needs_paint_hud = true;
-                        needs_paint_bench = true;
-                        force_sync = true;
-                        unsafe {
-                            let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE);
-                            if s.show_bench { let _ = ShowWindow(bench_hwnd, SW_SHOWNOACTIVATE); }
-                        }
-                    }
-                    OverlayCmd::Hide => {
-                        hud1_visible = false;
-                        toggle_hide_at = None;
-                        unsafe {
-                            let _ = ShowWindow(hud_hwnd, SW_HIDE);
-                            let _ = ShowWindow(bench_hwnd, SW_HIDE);
-                        }
-                    }
-                    OverlayCmd::ToggleHud(dur) => {
-                        hud1_visible = true;
-                        toggle_hide_at = Some(Instant::now() + dur);
-                        needs_paint_hud = true;
-                        force_sync = true;
-                        unsafe { let _ = ShowWindow(hud_hwnd, SW_SHOWNOACTIVATE); }
-                    }
-                    OverlayCmd::ClearHud => {
-                        s.connection.clear();
-                        s.premade.clear();
-                        s.prophet.clear();
-                        needs_paint_hud = true;
-                    }
-                    OverlayCmd::UpdateHud(conn, prem) => {
-                        if s.connection != conn || s.premade != prem {
-                            s.connection = conn;
-                            s.premade = prem;
-                            needs_paint_hud = true;
-                        }
-                    }
-                    OverlayCmd::UpdateProphet(info) => {
-                        if s.prophet != info {
-                            s.prophet = info;
-                            needs_paint_hud = true;
-                        }
-                    }
-                    OverlayCmd::ShowBench(show) => { 
-                        s.show_bench = show; needs_paint_bench = true;
-                        force_sync = true;
-                        unsafe { let _ = ShowWindow(bench_hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
-                    }
-                    OverlayCmd::SetSelectedSlot(idx) => {
-                        if s.selected_slot != Some(idx) {
-                            s.selected_slot = Some(idx); needs_paint_bench = true;
-                        }
-                    }
-                    OverlayCmd::ClearSelectedSlot => {
-                        if s.selected_slot.is_some() {
-                            s.selected_slot = None; needs_paint_bench = true;
-                        }
-                    }
-                    OverlayCmd::AutoFixWindow(zoom, forced) => {
-                        if let Some(target) = winapi::find_lcu_window() {
-                            winapi::fix_lcu_window_by_zoom(target, zoom, forced);
-                        }
-                    }
-                    OverlayCmd::Quit => {
-                        unsafe { let _ = UnhookWindowsHookEx(KEYBOARD_HOOK); PostQuitMessage(0); }
-                    }
+            if vm_rx.has_changed().unwrap_or(false) {
+                let new_vm = vm_rx.borrow_and_update().clone();
+                let s = unsafe { &mut *state };
+                
+                if s.vm.hud1_visible != new_vm.hud1_visible {
+                    debug!("UI: HUD1 可见性变更 -> {}", new_vm.hud1_visible);
+                    unsafe { let _ = ShowWindow(hud_hwnd, if new_vm.hud1_visible { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
                 }
+                if s.vm.hud2_visible != new_vm.hud2_visible {
+                    debug!("UI: HUD2 可见性变更 -> {}", new_vm.hud2_visible);
+                    unsafe { let _ = ShowWindow(bench_hwnd, if new_vm.hud2_visible { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+                }
+                
+                if s.vm.hud1_lines != new_vm.hud1_lines || s.vm.hud1_title != new_vm.hud1_title {
+                    needs_paint_hud = true;
+                }
+                if s.vm.hud2_selected_slot != new_vm.hud2_selected_slot {
+                    needs_paint_bench = true;
+                }
+                
+                s.vm = new_vm;
+                force_sync = true;
             }
 
-            // 2. 检查定时器隐藏
-            if let Some(at) = toggle_hide_at {
-                if Instant::now() >= at {
-                    hud1_visible = false;
-                    toggle_hide_at = None;
-                    unsafe { let _ = ShowWindow(hud_hwnd, SW_HIDE); }
-                }
-            }
-
-            // 3. 同步窗口位置
             if Instant::now().duration_since(last_sync) >= Duration::from_millis(150) || force_sync {
                 last_sync = Instant::now();
-                target_hwnd = winapi::find_lcu_window();
-                if let Some(target) = target_hwnd {
-                    if let Some(r) = winapi::get_window_rect(target) {
-                        let s = unsafe { &mut *state_ptr };
-                        let nw = r.right - r.left;
-                        let nh = r.bottom - r.top;
-                        let pos_changed = r.left != last_rect.left || r.top != last_rect.top || nw != s.win_w || nh != s.win_h;
+                let s = unsafe { &mut *state };
+                
+                if s.vm.lcu_rect.width > 0 {
+                    let nw = s.vm.lcu_rect.width;
+                    let nh = s.vm.lcu_rect.height;
+                    
+                    if nw != s.win_w || nh != s.win_h || force_sync {
+                        s.win_w = nw;
+                        s.win_h = nh;
+                        needs_paint_hud = true;
+                        needs_paint_bench = true;
                         
-                        if pos_changed || force_sync {
-                            s.win_w = nw;
-                            s.win_h = nh;
-                            last_rect = r;
-                            needs_paint_hud = true;
-                            needs_paint_bench = true;
-                            if s.show_bench {
-                                winapi::place_window_above_target(bench_hwnd, target, &r);
+                        let r = RECT { left: s.vm.lcu_rect.x, top: s.vm.lcu_rect.y, right: s.vm.lcu_rect.x + nw, bottom: s.vm.lcu_rect.y + nh };
+                        if s.vm.hud2_visible {
+                            let bench_r = get_bench_container_rect(nw, nh);
+                            let bx = r.left + bench_r.x.round() as i32;
+                            let by = r.top + bench_r.y.round() as i32;
+                            let bw = bench_r.w.round() as i32;
+                            let bh = bench_r.h.round() as i32;
+                            unsafe {
+                                let _ = SetWindowPos(bench_hwnd, HWND_TOPMOST, bx, by, bw, bh, SWP_NOACTIVATE);
                             }
                         }
                     }
@@ -756,21 +577,21 @@ fn overlay_message_loop(
                 force_sync = false;
             }
 
-            // 4. 按需重绘
-            if needs_paint_hud && hud1_visible {
-                unsafe { paint_hud(hud_hwnd, &*state_ptr); }
+            if needs_paint_hud && unsafe { (*state).vm.hud1_visible } {
+                unsafe { paint_hud(hud_hwnd, &*state); }
                 needs_paint_hud = false;
             }
-            if needs_paint_bench && unsafe { (*state_ptr).show_bench } {
-                unsafe { paint_bench(bench_hwnd, &*state_ptr); }
+            if needs_paint_bench && unsafe { (*state).vm.hud2_visible } {
+                unsafe { paint_bench(bench_hwnd, &*state); }
                 needs_paint_bench = false;
             }
         }
     }
+    info!("UI 消息循环已退出");
 }
 
 unsafe fn add_tray_icon(hwnd: HWND) {
-    let hinstance = GetModuleHandleW(None).unwrap();
+    let hinstance: HINSTANCE = GetModuleHandleW(None).unwrap().into();
     let hicon = LoadImageW(hinstance, PCWSTR(1 as _), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR).map(|h| HICON(h.0))
         .unwrap_or_else(|_| LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap());
     let mut nid = NOTIFYICONDATAW {
@@ -781,4 +602,38 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     let len = tip.len().min(nid.szTip.len() - 1);
     nid.szTip[..len].copy_from_slice(&tip[..len]);
     let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    info!("系统托盘图标已添加");
+}
+
+static mut HOOK_TX: Option<tokio::sync::mpsc::Sender<AppEvent>> = None;
+
+fn keyboard_hook_loop(event_tx: tokio::sync::mpsc::Sender<AppEvent>) {
+    unsafe {
+        let hinstance: HINSTANCE = GetModuleHandleW(None).unwrap().into();
+        info!("安装底层键盘钩子...");
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), hinstance, 0).unwrap();
+        KEYBOARD_HOOK.store(hook.0 as isize, Ordering::SeqCst);
+        
+        HOOK_TX = Some(event_tx);
+
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        let _ = UnhookWindowsHookEx(hook);
+        info!("键盘钩子已卸载");
+    }
+}
+
+unsafe extern "system" fn low_level_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 && wparam.0 as u32 == WM_KEYDOWN {
+        let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
+        if kbd.vkCode == VK_F1.0 as u32 {
+            if let Some(ref tx) = HOOK_TX {
+                let _ = tx.try_send(AppEvent::HotKeyF1);
+            }
+        }
+    }
+    CallNextHookEx(None, code, wparam, lparam)
 }

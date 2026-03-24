@@ -11,15 +11,13 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn, debug};
 
 use crate::app::config::new_shared_config;
-use crate::app::handlers;
 use crate::app::state::new_shared_state;
 use crate::lcu::api::LcuClient;
 use crate::lcu::connection::{build_client, wait_for_credentials};
 use crate::lcu::websocket::spawn_ws_loop;
-use crate::win::overlay::{spawn_overlay_thread, OverlayCmd, OverlaySender, TrayAction};
 
 // ── 单实例守卫 ───────────────────────────────────────────────────
 
@@ -84,160 +82,104 @@ async fn main() {
     logging::init_logging(None);
     info!("LOL LCU 助手启动 (HUD + Tray 模式)");
 
-    let config = new_shared_config();
-    let (action_tx, mut action_rx) = mpsc::channel::<TrayAction>(32);
-    let (click_tx, mut click_rx) = mpsc::channel::<usize>(32);
-    let overlay_tx = spawn_overlay_thread(config.clone(), action_tx, click_tx);
+    let config = crate::app::config::new_shared_config();
+    let state = crate::app::state::new_shared_state();
+    
+    // ── 初始化核心事件总线 ──────────────────────────────────────────
+    let (event_tx, event_rx) = mpsc::channel::<crate::app::event::AppEvent>(1024);
+    let (vm_tx, vm_rx) = tokio::sync::watch::channel(crate::app::viewmodel::ViewModel::default());
+    
+    // 启动主逻辑循环
+    let mut main_loop = crate::app::main_loop::MainLoop::new(
+        event_tx.clone(),
+        event_rx,
+        vm_tx,
+        state.clone(),
+        config.clone(),
+    );
+    
+    tokio::spawn(async move {
+        main_loop.run().await;
+    });
 
-    let state = new_shared_state();
+    // 启动 UI 线程 (传入 vm_rx 和 event_tx)
+    let _overlay_tx = crate::win::overlay::spawn_overlay_thread(
+        config.clone(),
+        event_tx.clone(),
+        vm_rx,
+    );
 
-    // 主重连循环
-    run_with_reconnect(state, config, overlay_tx.clone(), &mut action_rx, &mut click_rx).await;
+    // 启动 Tick 服务
+    {
+        let event_tx_c = event_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if event_tx_c.send(crate::app::event::AppEvent::Tick).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
 
-    let _ = overlay_tx.send(OverlayCmd::Quit).await;
+    // 主连接监控循环
+    connection_monitor_loop(event_tx).await;
 }
 
-async fn run_with_reconnect(
-    state: app::state::SharedState,
-    config: app::config::SharedConfig,
-    overlay_tx: OverlaySender,
-    action_rx: &mut mpsc::Receiver<TrayAction>,
-    click_rx: &mut mpsc::Receiver<usize>,
-) {
+async fn connection_monitor_loop(event_tx: mpsc::Sender<crate::app::event::AppEvent>) {
     loop {
-        info!("正在连接 LCU...");
-        let _ = overlay_tx.send(OverlayCmd::UpdateHud("等待连接...".to_owned(), String::new())).await;
+        debug!("开始探测 LCU 进程...");
+        let creds = wait_for_credentials().await;
+        info!("发现 LCU 进程: Port={}, Token=***{}", creds.port, &creds.token[creds.token.len()-4..]);
+        
+        let http_client = match build_client(&creds) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("构建 HTTP 客户端失败: {e}");
+                sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+        };
+        
+        let api = LcuClient::new(&creds, http_client);
+        let ws_handle = match spawn_ws_loop(&creds).await {
+            Ok(h) => h,
+            Err(e) => {
+                error!("WebSocket 连接失败: {e}");
+                sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+        };
 
-        match run_once(state.clone(), config.clone(), overlay_tx.clone(), action_rx, click_rx).await {
-            Ok(()) => info!("主循环正常结束"),
-            Err(e) => error!("连接中断: {e:#}"),
+        // 通知 MainLoop LCU 已连接
+        info!("发送 LcuConnected 事件至主循环");
+        let _ = event_tx.send(crate::app::event::AppEvent::LcuConnected(api.clone())).await;
+
+        // WebSocket 事件转发任务
+        let mut rx_ws = ws_handle.subscribe();
+        let event_tx_ws = event_tx.clone();
+        let ws_task = tokio::spawn(async move {
+            debug!("WebSocket 转发任务已启动");
+            while let Ok(event) = rx_ws.recv().await {
+                if event_tx_ws.send(crate::app::event::AppEvent::LcuEvent(event)).await.is_err() {
+                    break;
+                }
+            }
+            debug!("WebSocket 转发任务已退出");
+        });
+
+        // 初始状态同步
+        if let Ok(phase) = api.get_gameflow_phase().await {
+            info!("同步初始游戏阶段: {}", phase);
+            let _ = event_tx.send(crate::app::event::AppEvent::LcuPhaseChanged(phase)).await;
         }
 
-        state.lock().reset_session();
-        let _ = overlay_tx.send(OverlayCmd::Hide).await;
-        let _ = overlay_tx.send(OverlayCmd::ShowBench(false)).await;
-        let _ = overlay_tx.send(OverlayCmd::ClearHud).await;
+        // 等待连接断开
+        let _ = ws_task.await;
+        
+        warn!("LCU 连接已断开，准备重连...");
+        let _ = event_tx.send(crate::app::event::AppEvent::LcuDisconnected).await;
         
         sleep(Duration::from_secs(3)).await;
     }
-}
-
-async fn run_once(
-    state: app::state::SharedState,
-    config: app::config::SharedConfig,
-    overlay_tx: OverlaySender,
-    action_rx: &mut mpsc::Receiver<TrayAction>,
-    click_rx: &mut mpsc::Receiver<usize>,
-) -> anyhow::Result<()> {
-    let creds = wait_for_credentials().await;
-    let http_client = build_client(&creds)?;
-    let api = LcuClient::new(&creds, http_client);
-    let ws_handle = spawn_ws_loop(&creds).await?;
-
-    let summoner = api.get_current_summoner().await?;
-    let display_name = summoner.get("displayName").and_then(|v| v.as_str()).unwrap_or("<未知>").to_owned();
-
-    let _ = overlay_tx.send(OverlayCmd::UpdateHud(format!("已连接: {display_name}"), String::new())).await;
-
-    // 启动后台任务
-    {
-        let api_c = api.clone();
-        let config_c = config.clone();
-        tokio::spawn(async move {
-            app::tasks::memory_monitor_loop(api_c, config_c).await;
-        });
-        
-        let api_c2 = api.clone();
-        let tx_c = overlay_tx.clone();
-        tokio::spawn(async move {
-            app::tasks::window_fix_loop(api_c2, tx_c).await;
-        });
-    }
-
-    // 触发初始状态同步：确保应用启动时即使已在对局中也能正确衔接
-    {
-        let api_c = api.clone();
-        let state_c = state.clone();
-        let config_c = config.clone();
-        let tx_c = overlay_tx.clone();
-        tokio::spawn(async move {
-            // 1. 同步 Gameflow Phase
-            if let Ok(phase) = api_c.get_gameflow_phase().await {
-                let payload = serde_json::json!({ "data": phase });
-                handlers::handle_gameflow(api_c.clone(), state_c.clone(), config_c.clone(), tx_c.clone(), payload).await;
-                
-                // 2. 如果正在匹配准备中，尝试同步 ReadyCheck
-                if phase == "ReadyCheck" {
-                    if let Ok(rc) = api_c.get_ready_check().await {
-                        let payload = serde_json::json!({ "data": rc });
-                        handlers::handle_ready_check(api_c.clone(), state_c.clone(), config_c.clone(), payload).await;
-                    }
-                }
-                
-                // 3. 如果正在选人中，尝试同步 ChampSelect Session
-                if phase == "ChampSelect" {
-                    if let Ok(session) = api_c.get_champ_select_session().await {
-                        let payload = serde_json::json!({ "data": session });
-                        handlers::handle_champ_select(api_c.clone(), state_c.clone(), config_c.clone(), tx_c.clone(), payload).await;
-                    }
-                }
-            }
-        });
-    }
-
-    let mut rx_ws = ws_handle.subscribe();
-
-    loop {
-        tokio::select! {
-            click = click_rx.recv() => {
-                if let Some(idx) = click {
-                    let api_c = api.clone();
-                    let state_c = state.clone();
-                    let tx_c = overlay_tx.clone();
-                    tokio::spawn(async move {
-                        handlers::handle_overlay_click(api_c, state_c, tx_c, idx).await;
-                    });
-                }
-            }
-            ev = rx_ws.recv() => {
-                if let Ok(event) = ev {
-                    let api_c = api.clone();
-                    let state_c = state.clone();
-                    let config_c = config.clone();
-                    let tx_c = overlay_tx.clone();
-                    tokio::spawn(async move {
-                        app::dispatcher::dispatch_lcu_event(api_c, state_c, config_c, tx_c, event).await;
-                    });
-                }
-            }
-            action = action_rx.recv() => {
-                match action {
-                    Some(TrayAction::FixWindow) => {
-                        let api_c = api.clone();
-                        let tx_c = overlay_tx.clone();
-                        tokio::spawn(async move {
-                            if let Ok(zoom) = api_c.get_riotclient_zoom_scale().await {
-                                let _ = tx_c.send(OverlayCmd::AutoFixWindow(zoom, true)).await;
-                            }
-                        });
-                    }
-                    Some(TrayAction::ReloadUx) => {
-                        let api_c = api.clone();
-                        tokio::spawn(async move { let _ = api_c.reload_ux().await; });
-                    }
-                    Some(TrayAction::PlayAgain) => {
-                        let api_c = api.clone();
-                        tokio::spawn(async move { let _ = api_c.play_again().await; });
-                    }
-                    Some(TrayAction::FindForgottenLoot) => {
-                        let api_c = api.clone();
-                        tokio::spawn(async move { handlers::handle_find_forgotten_loot(api_c).await; });
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
