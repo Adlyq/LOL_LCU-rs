@@ -4,12 +4,15 @@
 //! - `WsLoop` 持有一个 `tokio::sync::broadcast` channel。
 //! - `spawn_ws_loop()` 在后台任务中读取 WebSocket 消息，过滤后广播 `LcuEvent`。
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use native_tls::TlsConnector;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
-use tokio_tungstenite::{connect_async_with_config, tungstenite::protocol::WebSocketConfig};
+use tokio_tungstenite::{
+    connect_async_tls_with_config, tungstenite::handshake::client::Request,
+    tungstenite::protocol::WebSocketConfig, Connector,
+};
 use tracing::{debug, error, info, trace, warn};
 
 use super::connection::LcuCredentials;
@@ -36,14 +39,20 @@ impl WsHandle {
 pub async fn spawn_ws_loop(creds: &LcuCredentials) -> anyhow::Result<WsHandle> {
     let (tx, _) = broadcast::channel(1024);
     let tx_c = tx.clone();
-    let url = format!("wss://127.0.0.1:{}/", creds.port);
-    let auth = format!("riot:{}", creds.auth_token);
-    let auth_base64 = B64.encode(auth.as_bytes());
+    let url = format!("wss://127.0.0.1:{}", creds.port);
+    let auth = creds.auth_header.clone();
+    let port = creds.port;
 
-    let mut request = reqwest::Request::new(reqwest::Method::GET, url.parse()?);
-    request
-        .headers_mut()
-        .insert("Authorization", format!("Basic {auth_base64}").parse()?);
+    // 构建带有认证信息和完整握手头信息的请求
+    let request = Request::builder()
+        .uri(&url)
+        .header("Authorization", &auth)
+        .header("Host", format!("127.0.0.1:{port}"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+        .body(())?;
 
     let config = WebSocketConfig {
         max_message_size: Some(64 * 1024 * 1024),
@@ -51,9 +60,17 @@ pub async fn spawn_ws_loop(creds: &LcuCredentials) -> anyhow::Result<WsHandle> {
         ..Default::default()
     };
 
+    // 禁用证书校验 (LCU 使用自签名证书)
+    let tls_connector = TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()?;
+    let connector = Connector::NativeTls(tls_connector);
+
     info!("正在连接 LCU WebSocket: wss://127.0.0.1:{}...", creds.port);
-    let (ws_stream, _) = connect_async_with_config(url, Some(config), true).await?;
+    let (ws_stream, _) = connect_async_tls_with_config(request, Some(config), false, Some(connector)).await?;
     let (mut write, mut read) = ws_stream.split();
+
 
     // 订阅所有事件 (Json RPC [5, "OnJsonApiEvent"])
     write
