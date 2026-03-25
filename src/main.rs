@@ -89,11 +89,19 @@ async fn main() {
     let (event_tx, event_rx) = mpsc::channel::<crate::app::event::AppEvent>(1024);
     let (vm_tx, vm_rx) = tokio::sync::watch::channel(crate::app::viewmodel::ViewModel::default());
     
+    // 启动 UI 线程 (传入 vm_rx 和 event_tx)
+    let overlay_tx = crate::win::overlay::spawn_overlay_thread(
+        config.clone(),
+        event_tx.clone(),
+        vm_rx,
+    );
+
     // 启动主逻辑循环
     let mut main_loop = crate::app::main_loop::MainLoop::new(
         event_tx.clone(),
         event_rx,
         vm_tx,
+        overlay_tx.clone(),
         state.clone(),
         config.clone(),
     );
@@ -101,13 +109,6 @@ async fn main() {
     tokio::spawn(async move {
         main_loop.run().await;
     });
-
-    // 启动 UI 线程 (传入 vm_rx 和 event_tx)
-    let _overlay_tx = crate::win::overlay::spawn_overlay_thread(
-        config.clone(),
-        event_tx.clone(),
-        vm_rx,
-    );
 
     // 启动 Tick 服务
     {

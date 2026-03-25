@@ -1,8 +1,7 @@
-use std::sync::Arc;
 use tokio::task::JoinSet;
-use serde_json::Value;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, debug};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::lcu::api::LcuClient;
 use crate::app::event::AppEvent;
@@ -26,6 +25,7 @@ impl ScoutService {
         their_team: Vec<(String, String)>,
         my_side: Option<u32>,
         their_side: Option<u32>,
+        token: CancellationToken,
     ) {
         let api = self.api.clone();
         let event_tx = self.event_tx.clone();
@@ -34,55 +34,56 @@ impl ScoutService {
 
         tokio::spawn(async move {
             // 1. 组黑分析
-            debug!("[Scout] 正在进行组黑分析...");
+            if token.is_cancelled() { return; }
+            
             let (my_res, their_res) = analyze_premade(&api, my_team.clone(), their_team.clone(), 2, 20).await;
             let premade_msg = format_premade_message(&my_res, &their_res, my_side, their_side);
             
-            // 发送组黑分析结果
+            if token.is_cancelled() { return; }
             let _ = event_tx.send(AppEvent::ScoutResult {
                 puuid: "TEAM_PREMADE".to_string(),
                 content: premade_msg,
                 is_premade: true,
                 is_enemy: false,
             }).await;
-            debug!("[Scout] 组黑分析完成并已发送");
 
             // 2. Prophet 评分分析
             let mut set = JoinSet::new();
             
-            // 我方
             for (puuid, name) in my_team {
                 let api_c = api.clone();
+                let t_c = token.clone();
                 set.spawn(async move {
-                    (puuid.clone(), name.clone(), Self::scout_player(&api_c, &puuid, &name).await, false)
+                    if t_c.is_cancelled() { return None; }
+                    Some((puuid.clone(), name.clone(), Self::scout_player(&api_c, &puuid, &name).await, false))
                 });
             }
             
-            // 对方
             for (puuid, name) in their_team {
                 let api_c = api.clone();
+                let t_c = token.clone();
                 set.spawn(async move {
-                    (puuid.clone(), name.clone(), Self::scout_player(&api_c, &puuid, &name).await, true)
+                    if t_c.is_cancelled() { return None; }
+                    Some((puuid.clone(), name.clone(), Self::scout_player(&api_c, &puuid, &name).await, true))
                 });
             }
 
-            let mut count = 0;
-            while let Some(Ok((puuid, name, content, is_enemy))) = set.join_next().await {
-                count += 1;
-                debug!("[Scout] 获取到玩家战绩 ({}): {} [{}]", if is_enemy { "敌" } else { "我" }, name, puuid);
-                let _ = event_tx.send(AppEvent::ScoutResult {
-                    puuid,
-                    content,
-                    is_premade: false,
-                    is_enemy,
-                }).await;
+            while let Some(Ok(res)) = set.join_next().await {
+                if token.is_cancelled() { break; }
+                if let Some((puuid, _name, content, is_enemy)) = res {
+                    let _ = event_tx.send(AppEvent::ScoutResult {
+                        puuid,
+                        content,
+                        is_premade: false,
+                        is_enemy,
+                    }).await;
+                }
             }
-            info!("[Scout] 分析任务全部结束，共处理 {} 名玩家", count);
+            info!("[Scout] 分析任务结束");
         });
     }
 
     async fn scout_player(api: &LcuClient, puuid: &str, name: &str) -> String {
-        debug!("[Scout] 正在获取玩家战绩: {}", name);
         if let Ok(history) = api.get_match_history(puuid, 8).await {
             let games = history.get("games")
                 .and_then(|v| if v.is_array() { Some(v) } else { v.get("games") })
@@ -95,7 +96,6 @@ impl ScoutService {
                 }
             }
         }
-        warn!("[Scout] 玩家战绩获取失败: {}", name);
         format!("-- {} 评分:获取失败", name)
     }
 }

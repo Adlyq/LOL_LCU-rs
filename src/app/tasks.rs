@@ -7,24 +7,30 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use tokio_util::sync::CancellationToken;
 
 use crate::lcu::api::LcuClient;
 use crate::app::config::SharedConfig;
 use crate::app::event::AppEvent;
 
 /// 窗口比例修复循环：定期检查 LCU 缩放并触发修复逻辑。
-pub async fn window_fix_loop(api: LcuClient, event_tx: mpsc::Sender<AppEvent>) {
+pub async fn window_fix_loop(api: LcuClient, event_tx: mpsc::Sender<AppEvent>, token: CancellationToken) {
     loop {
+        if token.is_cancelled() { break; }
+
         if let Ok(zoom) = api.get_riotclient_zoom_scale().await {
             let _ = event_tx.send(AppEvent::RequestWindowFix { zoom, forced: false }).await;
         }
-        // [AI PROMPT]: 保持 1500ms 间隔与 fix-lcu-window 自动模式一致，严禁修改。
-        sleep(Duration::from_millis(1500)).await;
+        
+        tokio::select! {
+            _ = sleep(Duration::from_millis(1500)) => {}
+            _ = token.cancelled() => break,
+        }
     }
 }
 
 /// 内存监控循环：当 LeagueClientUx.exe 内存超限时自动触发热重载。
-pub async fn memory_monitor_loop(api: LcuClient, config: SharedConfig) {
+pub async fn memory_monitor_loop(api: LcuClient, config: SharedConfig, token: CancellationToken) {
     const CHECK_INTERVAL_SECS: u64 = 5 * 60;
     const COOLDOWN_SECS: u64 = 30 * 60;
     const SAFE_PHASES: &[&str] = &["None", "Lobby", "Matchmaking", "EndOfGame", ""];
@@ -32,7 +38,12 @@ pub async fn memory_monitor_loop(api: LcuClient, config: SharedConfig) {
     let mut last_reload: Option<std::time::Instant> = None;
 
     loop {
-        sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+        if token.is_cancelled() { break; }
+
+        tokio::select! {
+            _ = sleep(Duration::from_secs(CHECK_INTERVAL_SECS)) => {}
+            _ = token.cancelled() => break,
+        }
 
         let (enabled, threshold_mb) = {
             let cfg = config.lock();

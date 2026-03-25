@@ -25,6 +25,9 @@ pub enum AppEvent {
     /// 板凳席槽位点击 (HUD2)
     BenchClick(usize),
     
+    /// 抢英雄任务结束 (自然结束或失败)
+    SniperFinished(usize),
+    
     /// 全局快捷键 F1
     HotKeyF1,
     

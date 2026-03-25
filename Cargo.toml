@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 # async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 
 # HTTP client (native-tls → Windows SChannel, 零外部依赖)
 reqwest = { version = "0.12", default-features = false, features = [
