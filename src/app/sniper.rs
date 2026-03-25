@@ -1,10 +1,10 @@
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, debug, warn, error};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 
-use crate::lcu::api::LcuClient;
 use crate::app::event::AppEvent;
+use crate::lcu::api::LcuClient;
 
 pub struct SniperService {
     api: LcuClient,
@@ -16,15 +16,25 @@ impl SniperService {
         Self { api, event_tx }
     }
 
-    pub async fn start_sniping(&self, champion_id: i64, slot_index: usize, token: CancellationToken) {
+    pub async fn start_sniping(
+        &self,
+        champion_id: i64,
+        slot_index: usize,
+        token: CancellationToken,
+    ) {
         let api = self.api.clone();
         let event_tx = self.event_tx.clone();
-        
-        info!("[Sniper] 启动抢英雄任务: ID={}, Slot={}", champion_id, slot_index);
+
+        info!(
+            "[Sniper] 启动抢英雄任务: ID={}, Slot={}",
+            champion_id, slot_index
+        );
 
         tokio::spawn(async move {
             loop {
-                if token.is_cancelled() { break; }
+                if token.is_cancelled() {
+                    break;
+                }
 
                 // 1. 尝试交换
                 let _ = api.swap_bench_champion(champion_id).await;

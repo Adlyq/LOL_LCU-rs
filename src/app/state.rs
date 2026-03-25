@@ -1,7 +1,7 @@
 //! 会议话状态管理
 
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// 全局共享会话状态
 pub type SharedState = Arc<Mutex<RuntimeState>>;
@@ -14,7 +14,7 @@ pub struct RuntimeState {
     pub premade_analysis_done: bool,
     /// 游戏内组队分析是否已完成
     pub premade_ingame_done: bool,
-    
+
     /// 当前正在尝试抢占的板凳席索引
     pub active_pick_slot: Option<usize>,
 }

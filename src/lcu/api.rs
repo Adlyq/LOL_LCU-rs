@@ -81,11 +81,7 @@ impl LcuClient {
         Self::check_status(resp, "GET", endpoint).await
     }
 
-    async fn raw_post(
-        &self,
-        endpoint: &str,
-        body: Option<Value>,
-    ) -> Result<Response, LcuApiError> {
+    async fn raw_post(&self, endpoint: &str, body: Option<Value>) -> Result<Response, LcuApiError> {
         let req = self.client.post(self.url(endpoint));
         let req = match body {
             Some(v) => req.json(&v),
@@ -95,12 +91,13 @@ impl LcuClient {
         Self::check_status(resp, "POST", endpoint).await
     }
 
-    async fn raw_patch(
-        &self,
-        endpoint: &str,
-        body: Value,
-    ) -> Result<Response, LcuApiError> {
-        let resp = self.client.patch(self.url(endpoint)).json(&body).send().await?;
+    async fn raw_patch(&self, endpoint: &str, body: Value) -> Result<Response, LcuApiError> {
+        let resp = self
+            .client
+            .patch(self.url(endpoint))
+            .json(&body)
+            .send()
+            .await?;
         Self::check_status(resp, "PATCH", endpoint).await
     }
 
@@ -142,21 +139,13 @@ impl LcuClient {
         Self::json_or_null(resp).await
     }
 
-    async fn post_json(
-        &self,
-        endpoint: &str,
-        body: Option<Value>,
-    ) -> Result<Value, LcuApiError> {
+    async fn post_json(&self, endpoint: &str, body: Option<Value>) -> Result<Value, LcuApiError> {
         debug!("POST {endpoint}");
         let resp = self.raw_post(endpoint, body).await?;
         Self::json_or_null(resp).await
     }
 
-    async fn patch_json(
-        &self,
-        endpoint: &str,
-        body: Value,
-    ) -> Result<Value, LcuApiError> {
+    async fn patch_json(&self, endpoint: &str, body: Value) -> Result<Value, LcuApiError> {
         debug!("PATCH {endpoint}");
         let resp = self.raw_patch(endpoint, body).await?;
         Self::json_or_null(resp).await
@@ -183,9 +172,8 @@ impl LcuClient {
     /// 获取 Riot 客户端缩放比例。
     pub async fn get_riotclient_zoom_scale(&self) -> Result<f64, LcuApiError> {
         let v = self.get_json("/riotclient/zoom-scale").await?;
-        v.as_f64().ok_or_else(|| {
-            LcuApiError::Other(format!("无效的 zoom-scale 响应: {v:?}"))
-        })
+        v.as_f64()
+            .ok_or_else(|| LcuApiError::Other(format!("无效的 zoom-scale 响应: {v:?}")))
     }
 
     /// 热重载 LCU 客户端界面（不会断开排队 / 游戏连接）。
@@ -193,7 +181,8 @@ impl LcuClient {
     /// 调用 `POST /riotclient/kill-and-restart-ux`：RiotClient 终止并重启
     /// LeagueClientUx 进程，仅重载 UI 层，不影响游戏状态。
     pub async fn reload_ux(&self) -> Result<(), LcuApiError> {
-        self.post_json("/riotclient/kill-and-restart-ux", None).await?;
+        self.post_json("/riotclient/kill-and-restart-ux", None)
+            .await?;
         Ok(())
     }
 
@@ -222,11 +211,13 @@ impl LcuClient {
     }
 
     pub async fn accept_ready_check(&self) -> Result<Value, LcuApiError> {
-        self.post_json("/lol-matchmaking/v1/ready-check/accept", None).await
+        self.post_json("/lol-matchmaking/v1/ready-check/accept", None)
+            .await
     }
 
     pub async fn decline_ready_check(&self) -> Result<Value, LcuApiError> {
-        self.post_json("/lol-matchmaking/v1/ready-check/decline", None).await
+        self.post_json("/lol-matchmaking/v1/ready-check/decline", None)
+            .await
     }
 
     // ── 点赞投票 ────────────────────────────────────────────────────
@@ -296,7 +287,9 @@ impl LcuClient {
     }
 
     pub async fn get_pickable_champion_ids(&self) -> Result<Vec<i64>, LcuApiError> {
-        let v = self.get_json("/lol-champ-select/v1/pickable-champion-ids").await?;
+        let v = self
+            .get_json("/lol-champ-select/v1/pickable-champion-ids")
+            .await?;
         Ok(v.as_array()
             .map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect())
             .unwrap_or_default())
@@ -330,9 +323,7 @@ impl LcuClient {
             None => {
                 let session = self.get_champ_select_session().await?;
                 let action = Self::find_local_action_static(&session, "pick", true)
-                    .ok_or_else(|| {
-                        LcuApiError::Other("当前没有可用的 pick 行动".into())
-                    })?;
+                    .ok_or_else(|| LcuApiError::Other("当前没有可用的 pick 行动".into()))?;
                 action
                     .get("id")
                     .and_then(|v| v.as_i64())
@@ -364,11 +355,8 @@ impl LcuClient {
     }
 
     pub async fn reroll_aram(&self) -> Result<Value, LcuApiError> {
-        self.post_json(
-            "/lol-champ-select/v1/session/my-selection/reroll",
-            None,
-        )
-        .await
+        self.post_json("/lol-champ-select/v1/session/my-selection/reroll", None)
+            .await
     }
 
     pub async fn swap_bench_champion(&self, champion_id: i64) -> Result<Value, LcuApiError> {
@@ -543,7 +531,9 @@ impl LcuClient {
 
     /// 获取 RSO Access Token (Authorization: Bearer ...)。
     pub async fn get_access_token(&self) -> Result<String, LcuApiError> {
-        let v = self.get_json("/lol-rso-auth/v1/authorization/access-token").await?;
+        let v = self
+            .get_json("/lol-rso-auth/v1/authorization/access-token")
+            .await?;
         v.get("token")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned())
@@ -554,11 +544,7 @@ impl LcuClient {
 
     /// 获取指定 PUUID 的最近场次战绩。
     /// 策略：优先 LCU 本地缓存，失败或数据不全则尝试 SGP (Riot 远程接口)。
-    pub async fn get_match_history(
-        &self,
-        puuid: &str,
-        count: usize,
-    ) -> Result<Value, LcuApiError> {
+    pub async fn get_match_history(&self, puuid: &str, count: usize) -> Result<Value, LcuApiError> {
         // 1. 尝试 LCU API (带重试逻辑，应对进入游戏初期 LCU 尚未加载完战绩的情况)
         let lcu_res = self.get_match_history_lcu(puuid, count).await;
         if let Ok(ref v) = lcu_res {
@@ -568,7 +554,10 @@ impl LcuClient {
         }
 
         // 2. 如果 LCU 战绩为空或获取失败，尝试通过 SGP 获取 (Fallback)
-        debug!("LCU 战绩为空或失败，尝试通过 SGP 获取 (PUUID={})", &puuid[..8.min(puuid.len())]);
+        debug!(
+            "LCU 战绩为空或失败，尝试通过 SGP 获取 (PUUID={})",
+            &puuid[..8.min(puuid.len())]
+        );
         match self.get_match_history_sgp(puuid, count).await {
             Ok(v) => Ok(v),
             Err(e) => {
@@ -582,9 +571,8 @@ impl LcuClient {
     /// 内部：仅通过 LCU 获取战绩。
     async fn get_match_history_lcu(&self, puuid: &str, count: usize) -> Result<Value, LcuApiError> {
         let end = count.saturating_sub(1);
-        let endpoint = format!(
-            "/lol-match-history/v1/products/lol/{puuid}/matches?begIndex=0&endIndex={end}"
-        );
+        let endpoint =
+            format!("/lol-match-history/v1/products/lol/{puuid}/matches?begIndex=0&endIndex={end}");
 
         let mut retry_count = 0;
         let max_retries = 2;
@@ -612,14 +600,25 @@ impl LcuClient {
     async fn get_match_history_sgp(&self, puuid: &str, count: usize) -> Result<Value, LcuApiError> {
         let access_token = self.get_access_token().await?;
         let ent_token = self.get_entitlements_token().await?;
-        
+
         // 自动探测 Region
-        let region = self.get_json("/riotclient/region-locale").await
-            .map(|v| v.get("region").and_then(|s| s.as_str()).unwrap_or("hn1").to_lowercase())
+        let region = self
+            .get_json("/riotclient/region-locale")
+            .await
+            .map(|v| {
+                v.get("region")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("hn1")
+                    .to_lowercase()
+            })
             .unwrap_or_else(|_| "hn1".to_string());
 
         // 国服环境使用通用的 BGP 代理，非国服使用 sgp.pvp.net
-        let url = if region.contains("hn") || region.contains("tj") || region.contains("sh") || region.contains("gz") {
+        let url = if region.contains("hn")
+            || region.contains("tj")
+            || region.contains("sh")
+            || region.contains("gz")
+        {
             format!("https://bgp.pallas.penta.qq.com/sgp/shno/v1/products/lol/player-history/v1/products/lol/{}/matches?begIndex=0&endIndex={}", 
                 puuid, count.saturating_sub(1))
         } else {
@@ -627,7 +626,9 @@ impl LcuClient {
                 puuid, count)
         };
 
-        let resp = self.client.get(&url)
+        let resp = self
+            .client
+            .get(&url)
             .header("Authorization", format!("Bearer {access_token}"))
             .header("X-Riot-Entitlements-JWT", ent_token)
             .send()
@@ -643,7 +644,7 @@ impl LcuClient {
         }
 
         let mut v = resp.json::<Value>().await?;
-        
+
         // 适配 LCU 格式：SGP 返回的是摘要列表，LCU 期望包裹在 { games: { games: [...] } } 中
         // 某些 SGP 接口返回 { games: [...] }，某些直接返回数组 [...]
         if v.is_array() {
@@ -661,10 +662,17 @@ impl LcuClient {
     }
 
     fn is_match_history_valid(v: &Value) -> bool {
-        let games = v.get("games")
-            .and_then(|g| if g.is_array() { Some(g) } else { g.get("games") })
+        let games = v
+            .get("games")
+            .and_then(|g| {
+                if g.is_array() {
+                    Some(g)
+                } else {
+                    g.get("games")
+                }
+            })
             .and_then(|arr| arr.as_array());
-        
+
         match games {
             Some(arr) => !arr.is_empty(),
             None => false,
@@ -677,10 +685,15 @@ impl LcuClient {
         self.get_json("/lol-loot/v1/player-loot").await
     }
 
-    pub async fn call_loot_recipe(&self, loot_id: &str, recipe_name: &str) -> Result<Value, LcuApiError> {
+    pub async fn call_loot_recipe(
+        &self,
+        loot_id: &str,
+        recipe_name: &str,
+    ) -> Result<Value, LcuApiError> {
         self.post_json(
             &format!("/lol-loot/v1/recipes/{recipe_name}/craft?repeat=1"),
-            Some(serde_json::json!([loot_id]))
-        ).await
+            Some(serde_json::json!([loot_id])),
+        )
+        .await
     }
 }

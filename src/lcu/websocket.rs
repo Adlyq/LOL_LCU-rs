@@ -4,10 +4,10 @@
 //! - `WsLoop` 持有一个 `tokio::sync::broadcast` channel。
 //! - `spawn_ws_loop()` 在后台任务中读取 WebSocket 消息，过滤后广播 `LcuEvent`。
 
-use std::sync::Arc;
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async_with_config, tungstenite::protocol::WebSocketConfig};
 use tracing::{debug, error, info, trace, warn};
@@ -41,7 +41,9 @@ pub async fn spawn_ws_loop(creds: &LcuCredentials) -> anyhow::Result<WsHandle> {
     let auth_base64 = base64::encode(auth);
 
     let mut request = reqwest::Request::new(reqwest::Method::GET, url.parse()?);
-    request.headers_mut().insert("Authorization", format!("Basic {auth_base64}").parse()?);
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Basic {auth_base64}").parse()?);
 
     let config = WebSocketConfig {
         max_message_size: Some(64 * 1024 * 1024),
@@ -54,7 +56,11 @@ pub async fn spawn_ws_loop(creds: &LcuCredentials) -> anyhow::Result<WsHandle> {
     let (mut write, mut read) = ws_stream.split();
 
     // 订阅所有事件 (Json RPC [5, "OnJsonApiEvent"])
-    write.send(tokio_tungstenite::tungstenite::Message::Text(json!([5, "OnJsonApiEvent"]).to_string())).await?;
+    write
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            json!([5, "OnJsonApiEvent"]).to_string(),
+        ))
+        .await?;
     info!("已成功订阅 LCU OnJsonApiEvent");
 
     let task = tokio::spawn(async move {
@@ -67,7 +73,11 @@ pub async fn spawn_ws_loop(creds: &LcuCredentials) -> anyhow::Result<WsHandle> {
                             if let Ok(event) = serde_json::from_value::<LcuEvent>(arr[2].clone()) {
                                 // 仅广播我们感兴趣的事件以减少总线压力
                                 let uri = &event.uri;
-                                if uri.contains("gameflow") || uri.contains("champ-select") || uri.contains("ready-check") || uri.contains("lobby") {
+                                if uri.contains("gameflow")
+                                    || uri.contains("champ-select")
+                                    || uri.contains("ready-check")
+                                    || uri.contains("lobby")
+                                {
                                     debug!("WS 广播事件: {} ({})", uri, event.event_type);
                                     let _ = tx_c.send(event);
                                 }

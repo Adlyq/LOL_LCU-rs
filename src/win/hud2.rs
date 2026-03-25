@@ -1,12 +1,12 @@
 //! HUD2: 大乱斗板凳席交互层
 
+use tracing::trace;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
-use tracing::trace;
 
-use crate::win::overlay::WndState;
-use crate::win::base::rgb;
 use crate::app::event::AppEvent;
+use crate::win::base::rgb;
+use crate::win::overlay::WndState;
 
 // 布局常量 (1920x1080 模板)
 const TEMPLATE_W: f64 = 1920.0;
@@ -19,16 +19,30 @@ const SLOT_SIZE: f64 = 70.0;
 const BENCH_SLOT_COUNT: usize = 10;
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FRect { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
+pub struct FRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
 impl FRect {
     pub fn contains(&self, px: f64, py: f64) -> bool {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
     }
-    pub fn right(&self) -> f64 { self.x + self.w }
-    pub fn bottom(&self) -> f64 { self.y + self.h }
+    pub fn right(&self) -> f64 {
+        self.x + self.w
+    }
+    pub fn bottom(&self) -> f64 {
+        self.y + self.h
+    }
 }
 
-pub unsafe extern "system" fn bench_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+pub unsafe extern "system" fn bench_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_NCHITTEST => {
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
@@ -40,7 +54,9 @@ pub unsafe extern "system" fn bench_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
                 if GetWindowRect(hwnd, &mut wr).is_ok() {
                     let px = (sx - wr.left) as f64;
                     let py = (sy - wr.top) as f64;
-                    if hit_slot(px, py, state).is_some() { return LRESULT(HTCLIENT as isize); }
+                    if hit_slot(px, py, state).is_some() {
+                        return LRESULT(HTCLIENT as isize);
+                    }
                 }
             }
             LRESULT(HTTRANSPARENT as isize)
@@ -79,7 +95,7 @@ pub fn get_slot_rect(index: usize, container: FRect, win_w: i32, win_h: i32) -> 
     let slot_w = SLOT_SIZE * scale;
     let slot_h = SLOT_SIZE * scale;
     let edge_inset = f64::max(0.0, 1.5 * scale);
-    
+
     FRect {
         x: container.x + (index as f64 * (slot_w + edge_inset)),
         y: container.y,
@@ -89,9 +105,13 @@ pub fn get_slot_rect(index: usize, container: FRect, win_w: i32, win_h: i32) -> 
 }
 
 fn hit_slot(px: f64, py: f64, state: &WndState) -> Option<usize> {
-    if !state.vm.hud2_visible { return None; }
+    if !state.vm.hud2_visible {
+        return None;
+    }
     let container = get_bench_container_rect(state.win_w, state.win_h);
-    if !container.contains(px, py) { return None; }
+    if !container.contains(px, py) {
+        return None;
+    }
     for i in 0..BENCH_SLOT_COUNT {
         if get_slot_rect(i, container, state.win_w, state.win_h).contains(px, py) {
             return Some(i);
@@ -106,19 +126,37 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     let _ = GetWindowRect(hwnd, &mut rect);
     let win_w = rect.right - rect.left;
     let win_h = rect.bottom - rect.top;
-    if win_w <= 0 || win_h <= 0 { return; }
+    if win_w <= 0 || win_h <= 0 {
+        return;
+    }
 
     let hdc_screen = GetDC(HWND::default());
     let hdc_mem = CreateCompatibleDC(hdc_screen);
 
     let bi = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: win_w, biHeight: -win_h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default()
+        biWidth: win_w,
+        biHeight: -win_h,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB.0,
+        ..Default::default()
     };
     let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbm = CreateDIBSection(hdc_mem, &BITMAPINFO { bmiHeader: bi, ..Default::default() }, DIB_RGB_COLORS, &mut bits_ptr, HANDLE::default(), 0).expect("无法创建 DIBSection");
+    let hbm = CreateDIBSection(
+        hdc_mem,
+        &BITMAPINFO {
+            bmiHeader: bi,
+            ..Default::default()
+        },
+        DIB_RGB_COLORS,
+        &mut bits_ptr,
+        HANDLE::default(),
+        0,
+    )
+    .expect("无法创建 DIBSection");
     let old_bm = SelectObject(hdc_mem, hbm);
-    
+
     // 初始化全透明
     std::ptr::write_bytes(bits_ptr, 0, (win_w * win_h * 4) as usize);
     let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (win_w * win_h) as usize);
@@ -126,15 +164,23 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     if state.vm.hud2_visible {
         let container = get_bench_container_rect(win_w, win_h);
         let scale_y = win_h as f64 / TEMPLATE_H;
-        
+
         // 填充容器背景 (Alpha=2)
         fill_rect_alpha(pixels, win_w, win_h, container, 0, 0, 0, 2);
-        
+
         let pen_gray = CreatePen(PS_SOLID, 1, rgb(128, 128, 128));
         let old_pen = SelectObject(hdc_mem, pen_gray);
         let old_brush = SelectObject(hdc_mem, GetStockObject(NULL_BRUSH));
-        let _ = RoundRect(hdc_mem, container.x as i32, container.y as i32, container.right() as i32, container.bottom() as i32, (10.0 * scale_y) as i32, (10.0 * scale_y) as i32);
-        
+        let _ = RoundRect(
+            hdc_mem,
+            container.x as i32,
+            container.y as i32,
+            container.right() as i32,
+            container.bottom() as i32,
+            (10.0 * scale_y) as i32,
+            (10.0 * scale_y) as i32,
+        );
+
         let pen_slot = CreatePen(PS_SOLID, 1, rgb(160, 160, 160));
         SelectObject(hdc_mem, pen_slot);
         for i in 0..BENCH_SLOT_COUNT {
@@ -144,20 +190,49 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
             } else {
                 fill_rect_alpha(pixels, win_w, win_h, sr, 0, 0, 0, 2);
             }
-            let _ = RoundRect(hdc_mem, sr.x as i32, sr.y as i32, sr.right() as i32, sr.bottom() as i32, (8.0 * scale_y) as i32, (8.0 * scale_y) as i32);
+            let _ = RoundRect(
+                hdc_mem,
+                sr.x as i32,
+                sr.y as i32,
+                sr.right() as i32,
+                sr.bottom() as i32,
+                (8.0 * scale_y) as i32,
+                (8.0 * scale_y) as i32,
+            );
         }
-        
+
         SelectObject(hdc_mem, old_pen);
         SelectObject(hdc_mem, old_brush);
         let _ = DeleteObject(pen_gray);
         let _ = DeleteObject(pen_slot);
     }
 
-    let pt_dst = POINT { x: rect.left, y: rect.top };
+    let pt_dst = POINT {
+        x: rect.left,
+        y: rect.top,
+    };
     let pt_src = POINT { x: 0, y: 0 };
-    let size_dst = SIZE { cx: win_w, cy: win_h };
-    let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
-    let _ = UpdateLayeredWindow(hwnd, hdc_screen, Some(&pt_dst), Some(&size_dst), hdc_mem, Some(&pt_src), COLORREF(0), Some(&blend), ULW_ALPHA);
+    let size_dst = SIZE {
+        cx: win_w,
+        cy: win_h,
+    };
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let _ = UpdateLayeredWindow(
+        hwnd,
+        hdc_screen,
+        Some(&pt_dst),
+        Some(&size_dst),
+        hdc_mem,
+        Some(&pt_src),
+        COLORREF(0),
+        Some(&blend),
+        ULW_ALPHA,
+    );
 
     SelectObject(hdc_mem, old_bm);
     let _ = DeleteObject(hbm);
@@ -165,12 +240,21 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     ReleaseDC(HWND::default(), hdc_screen);
 }
 
-fn fill_rect_alpha(pixels: &mut [u32], win_w: i32, win_h: i32, rect: FRect, r: u8, g: u8, b: u8, a: u8) {
+fn fill_rect_alpha(
+    pixels: &mut [u32],
+    win_w: i32,
+    win_h: i32,
+    rect: FRect,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
     let x0 = rect.x.round() as i32;
     let y0 = rect.y.round() as i32;
     let x1 = (rect.x + rect.w).round() as i32;
     let y1 = (rect.y + rect.h).round() as i32;
-    
+
     let alpha_f = a as f32 / 255.0;
     let pr = (r as f32 * alpha_f) as u32;
     let pg = (g as f32 * alpha_f) as u32;

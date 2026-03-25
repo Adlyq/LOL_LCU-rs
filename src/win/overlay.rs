@@ -5,11 +5,11 @@ pub mod hud1;
 pub mod hud2;
 pub mod tray;
 
-use std::thread;
-use std::sync::mpsc as std_mpsc;
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicIsize, Ordering};
-use tracing::{info, debug, trace};
+use std::sync::mpsc as std_mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+use tracing::{debug, info, trace};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
@@ -21,12 +21,12 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::app::config::SharedConfig;
 use crate::app::event::AppEvent;
 use crate::app::viewmodel::ViewModel;
-use crate::win::winapi::to_wide;
 use crate::win::base::SendHwnd;
+use crate::win::winapi::to_wide;
 
 use self::hud1::{hud_wnd_proc, paint_hud};
-use self::hud2::{bench_wnd_proc, paint_bench, get_bench_container_rect};
-use self::tray::{tray_wnd_proc, add_tray_icon};
+use self::hud2::{bench_wnd_proc, get_bench_container_rect, paint_bench};
+use self::tray::{add_tray_icon, tray_wnd_proc};
 
 pub const WM_VM_UPDATED: u32 = WM_USER + 101;
 
@@ -67,7 +67,10 @@ pub fn spawn_overlay_thread(
     });
 
     let hud_hwnd = hwnd_rx.recv().expect("无法获取 Overlay HWND");
-    OverlaySender { tx: event_tx, hud_hwnd }
+    OverlaySender {
+        tx: event_tx,
+        hud_hwnd,
+    }
 }
 
 static UI_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -80,7 +83,7 @@ fn overlay_message_loop(
     hwnd_tx: std_mpsc::Sender<SendHwnd>,
 ) {
     let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None).unwrap().into() };
-    
+
     // 注册所有窗口类
     unsafe {
         let hud_class = to_wide("LOL_HUD_CLASS");
@@ -106,51 +109,85 @@ fn overlay_message_loop(
     let hud_hwnd = unsafe {
         CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-            PCWSTR(to_wide("LOL_HUD_CLASS").as_ptr()), PCWSTR(to_wide("LOL_HUD").as_ptr()),
-            WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
-            None, None, hinstance, None
-        ).unwrap()
+            PCWSTR(to_wide("LOL_HUD_CLASS").as_ptr()),
+            PCWSTR(to_wide("LOL_HUD").as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            GetSystemMetrics(SM_CXSCREEN),
+            GetSystemMetrics(SM_CYSCREEN),
+            None,
+            None,
+            hinstance,
+            None,
+        )
+        .unwrap()
     };
 
     let bench_hwnd = unsafe {
         CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-            PCWSTR(to_wide("LOL_BENCH_CLASS").as_ptr()), PCWSTR(to_wide("LOL_BENCH").as_ptr()),
-            WS_POPUP, 0, 0, 1, 1, None, None, hinstance, None
-        ).unwrap()
+            PCWSTR(to_wide("LOL_BENCH_CLASS").as_ptr()),
+            PCWSTR(to_wide("LOL_BENCH").as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            hinstance,
+            None,
+        )
+        .unwrap()
     };
 
     let tray_hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_NOACTIVATE, PCWSTR(to_wide("LOL_TRAY_CLASS").as_ptr()), PCWSTR(to_wide("LOL_TRAY").as_ptr()),
-            WS_POPUP, 0, 0, 0, 0, None, None, hinstance, None
-        ).unwrap()
+            WS_EX_NOACTIVATE,
+            PCWSTR(to_wide("LOL_TRAY_CLASS").as_ptr()),
+            PCWSTR(to_wide("LOL_TRAY").as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            hinstance,
+            None,
+        )
+        .unwrap()
     };
 
     let state = Box::into_raw(Box::new(WndState {
         vm: ViewModel::default(),
         config: config.clone(),
         event_tx: event_tx.clone(),
-        win_w: 1, win_h: 1,
+        win_w: 1,
+        win_h: 1,
     }));
 
     unsafe {
         SetWindowLongPtrW(hud_hwnd, GWLP_USERDATA, state as isize);
         SetWindowLongPtrW(bench_hwnd, GWLP_USERDATA, state as isize);
         SetWindowLongPtrW(tray_hwnd, GWLP_USERDATA, state as isize);
-        
+
         add_tray_icon(tray_hwnd);
         UI_HWND.store(hud_hwnd.0 as isize, Ordering::SeqCst);
-        
+
         let event_tx_hook = event_tx.clone();
-        thread::Builder::new().name("keyboard-hook".to_owned()).spawn(move || {
-            keyboard_hook_loop(event_tx_hook);
-        }).expect("启动监控线程失败");
+        thread::Builder::new()
+            .name("keyboard-hook".to_owned())
+            .spawn(move || {
+                keyboard_hook_loop(event_tx_hook);
+            })
+            .expect("启动监控线程失败");
     }
     let _ = hwnd_tx.send(SendHwnd(hud_hwnd));
 
     let mut last_sync = Instant::now();
-    let mut force_sync = true; 
+    let mut force_sync = true;
     let mut needs_paint_hud = false;
     let mut needs_paint_bench = false;
 
@@ -169,15 +206,33 @@ fn overlay_message_loop(
             if vm_rx.has_changed().unwrap_or(false) {
                 let new_vm = vm_rx.borrow_and_update().clone();
                 let s = unsafe { &mut *state };
-                
+
                 // 可见性联动
                 if s.vm.hud1_visible != new_vm.hud1_visible {
-                    unsafe { let _ = ShowWindow(hud_hwnd, if new_vm.hud1_visible { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+                    unsafe {
+                        let _ = ShowWindow(
+                            hud_hwnd,
+                            if new_vm.hud1_visible {
+                                SW_SHOWNOACTIVATE
+                            } else {
+                                SW_HIDE
+                            },
+                        );
+                    }
                 }
                 if s.vm.hud2_visible != new_vm.hud2_visible {
-                    unsafe { let _ = ShowWindow(bench_hwnd, if new_vm.hud2_visible { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+                    unsafe {
+                        let _ = ShowWindow(
+                            bench_hwnd,
+                            if new_vm.hud2_visible {
+                                SW_SHOWNOACTIVATE
+                            } else {
+                                SW_HIDE
+                            },
+                        );
+                    }
                 }
-                
+
                 // 内容变更检查
                 if s.vm.hud1_lines != new_vm.hud1_lines || s.vm.hud1_title != new_vm.hud1_title {
                     needs_paint_hud = true;
@@ -185,31 +240,32 @@ fn overlay_message_loop(
                 if s.vm.hud2_selected_slot != new_vm.hud2_selected_slot {
                     needs_paint_bench = true;
                 }
-                
+
                 s.vm = new_vm;
                 force_sync = true;
             }
 
             // 窗口对齐逻辑
-            if Instant::now().duration_since(last_sync) >= Duration::from_millis(150) || force_sync {
+            if Instant::now().duration_since(last_sync) >= Duration::from_millis(150) || force_sync
+            {
                 last_sync = Instant::now();
                 let s = unsafe { &mut *state };
-                
+
                 if s.vm.lcu_rect.width > 0 {
                     let nw = s.vm.lcu_rect.width;
                     let nh = s.vm.lcu_rect.height;
-                    
+
                     if nw != s.win_w || nh != s.win_h || force_sync {
                         s.win_w = nw;
                         s.win_h = nh;
                         needs_paint_hud = true;
                         needs_paint_bench = true;
-                        
-                        let r = windows::Win32::Foundation::RECT { 
-                            left: s.vm.lcu_rect.x, 
-                            top: s.vm.lcu_rect.y, 
-                            right: s.vm.lcu_rect.x + nw, 
-                            bottom: s.vm.lcu_rect.y + nh 
+
+                        let r = windows::Win32::Foundation::RECT {
+                            left: s.vm.lcu_rect.x,
+                            top: s.vm.lcu_rect.y,
+                            right: s.vm.lcu_rect.x + nw,
+                            bottom: s.vm.lcu_rect.y + nh,
                         };
                         if s.vm.hud2_visible {
                             let bench_r = get_bench_container_rect(nw, nh);
@@ -218,7 +274,15 @@ fn overlay_message_loop(
                             let bw = bench_r.w.round() as i32;
                             let bh = bench_r.h.round() as i32;
                             unsafe {
-                                let _ = SetWindowPos(bench_hwnd, HWND_TOPMOST, bx, by, bw, bh, SWP_NOACTIVATE);
+                                let _ = SetWindowPos(
+                                    bench_hwnd,
+                                    HWND_TOPMOST,
+                                    bx,
+                                    by,
+                                    bw,
+                                    bh,
+                                    SWP_NOACTIVATE,
+                                );
                             }
                         }
                     }
@@ -228,11 +292,15 @@ fn overlay_message_loop(
 
             // 执行绘制
             if needs_paint_hud && unsafe { (*state).vm.hud1_visible } {
-                unsafe { paint_hud(hud_hwnd, &*state); }
+                unsafe {
+                    paint_hud(hud_hwnd, &*state);
+                }
                 needs_paint_hud = false;
             }
             if needs_paint_bench && unsafe { (*state).vm.hud2_visible } {
-                unsafe { paint_bench(bench_hwnd, &*state); }
+                unsafe {
+                    paint_bench(bench_hwnd, &*state);
+                }
                 needs_paint_bench = false;
             }
         }
@@ -244,7 +312,8 @@ static mut HOOK_TX: Option<tokio::sync::mpsc::Sender<AppEvent>> = None;
 fn keyboard_hook_loop(event_tx: tokio::sync::mpsc::Sender<AppEvent>) {
     unsafe {
         let hinstance: HINSTANCE = GetModuleHandleW(None).unwrap().into();
-        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), hinstance, 0).unwrap();
+        let hook =
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), hinstance, 0).unwrap();
         KEYBOARD_HOOK.store(hook.0 as isize, Ordering::SeqCst);
         HOOK_TX = Some(event_tx);
 
@@ -257,7 +326,11 @@ fn keyboard_hook_loop(event_tx: tokio::sync::mpsc::Sender<AppEvent>) {
     }
 }
 
-unsafe extern "system" fn low_level_keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn low_level_keyboard_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     if code == HC_ACTION as i32 && wparam.0 as u32 == WM_KEYDOWN {
         let kbd = *(lparam.0 as *const KBDLLHOOKSTRUCT);
         if kbd.vkCode == VK_F1.0 as u32 {

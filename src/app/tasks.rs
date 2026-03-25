@@ -4,24 +4,35 @@
 //! - LCU 内存监控与自动重载
 
 use std::time::Duration;
-use tokio::time::sleep;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
-use crate::lcu::api::LcuClient;
 use crate::app::config::SharedConfig;
 use crate::app::event::AppEvent;
+use crate::lcu::api::LcuClient;
 
 /// 窗口比例修复循环：定期检查 LCU 缩放并触发修复逻辑。
-pub async fn window_fix_loop(api: LcuClient, event_tx: mpsc::Sender<AppEvent>, token: CancellationToken) {
+pub async fn window_fix_loop(
+    api: LcuClient,
+    event_tx: mpsc::Sender<AppEvent>,
+    token: CancellationToken,
+) {
     loop {
-        if token.is_cancelled() { break; }
+        if token.is_cancelled() {
+            break;
+        }
 
         if let Ok(zoom) = api.get_riotclient_zoom_scale().await {
-            let _ = event_tx.send(AppEvent::RequestWindowFix { zoom, forced: false }).await;
+            let _ = event_tx
+                .send(AppEvent::RequestWindowFix {
+                    zoom,
+                    forced: false,
+                })
+                .await;
         }
-        
+
         tokio::select! {
             _ = sleep(Duration::from_millis(1500)) => {}
             _ = token.cancelled() => break,
@@ -38,7 +49,9 @@ pub async fn memory_monitor_loop(api: LcuClient, config: SharedConfig, token: Ca
     let mut last_reload: Option<std::time::Instant> = None;
 
     loop {
-        if token.is_cancelled() { break; }
+        if token.is_cancelled() {
+            break;
+        }
 
         tokio::select! {
             _ = sleep(Duration::from_secs(CHECK_INTERVAL_SECS)) => {}
@@ -49,20 +62,28 @@ pub async fn memory_monitor_loop(api: LcuClient, config: SharedConfig, token: Ca
             let cfg = config.lock();
             (cfg.memory_monitor, cfg.memory_threshold_mb)
         };
-        if !enabled { continue; }
+        if !enabled {
+            continue;
+        }
 
         if let Some(t) = last_reload {
-            if t.elapsed().as_secs() < COOLDOWN_SECS { continue; }
+            if t.elapsed().as_secs() < COOLDOWN_SECS {
+                continue;
+            }
         }
 
         let phase = match api.get_gameflow_phase().await {
             Ok(p) => p,
             Err(_) => continue,
         };
-        if !SAFE_PHASES.contains(&phase.as_str()) { continue; }
+        if !SAFE_PHASES.contains(&phase.as_str()) {
+            continue;
+        }
 
         let mem_mb = get_lcu_ux_memory_mb();
-        if mem_mb == 0 || mem_mb < threshold_mb { continue; }
+        if mem_mb == 0 || mem_mb < threshold_mb {
+            continue;
+        }
 
         warn!("LeagueClientUx 内存 {mem_mb} MB 超过阈值 {threshold_mb} MB，触发自动热重载...");
         if api.reload_ux().await.is_ok() {
@@ -81,7 +102,12 @@ fn get_lcu_ux_memory_mb() -> u64 {
         ProcessRefreshKind::new().with_memory(),
     );
     for process in sys.processes().values() {
-        if process.name().to_string_lossy().to_lowercase().contains("leagueclientux") {
+        if process
+            .name()
+            .to_string_lossy()
+            .to_lowercase()
+            .contains("leagueclientux")
+        {
             return process.memory() / 1_048_576;
         }
     }

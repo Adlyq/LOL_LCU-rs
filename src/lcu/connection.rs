@@ -1,4 +1,4 @@
-﻿//! LCU 连接信息读取
+//! LCU 连接信息读取
 //!
 //! 通过扫描系统进程列表找到 `LeagueClient.exe`，
 //! 从其启动参数中提取 `--app-port` 和 `--remoting-auth-token`。
@@ -15,10 +15,7 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 /// 尝试匹配的 LCU 进程名（全部小写比较）
-const LCU_PROCESS_NAMES: &[&str] = &[
-    "leagueclient.exe",
-    "leagueclientux.exe",
-];
+const LCU_PROCESS_NAMES: &[&str] = &["leagueclient.exe", "leagueclientux.exe"];
 
 /// 连接凭据（端口号 + 认证信息）。
 #[derive(Debug, Clone)]
@@ -51,7 +48,11 @@ impl LcuCredentials {
         let auth_token = auth_token?;
         let raw = format!("riot:{auth_token}");
         let auth_header = format!("Basic {}", B64.encode(raw.as_bytes()));
-        Some(Self { port, auth_token, auth_header })
+        Some(Self {
+            port,
+            auth_token,
+            auth_header,
+        })
     }
 }
 
@@ -127,10 +128,7 @@ pub fn build_client(creds: &LcuCredentials) -> Result<Client> {
                 reqwest::header::CONTENT_TYPE,
                 "application/json".parse().unwrap(),
             );
-            headers.insert(
-                reqwest::header::ACCEPT,
-                "application/json".parse().unwrap(),
-            );
+            headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
             headers
         })
         .build()

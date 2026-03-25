@@ -1,22 +1,22 @@
-use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
 use parking_lot::Mutex;
-use tracing::{info, warn, debug, error};
 use serde_json::Value;
-use std::time::Duration;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 
-use crate::app::event::{AppEvent, TrayAction};
-use crate::app::state::RuntimeState;
-use crate::app::viewmodel::ViewModel;
 use crate::app::config::SharedConfig;
-use crate::lcu::api::{LcuClient, gameflow};
-use crate::win::winapi;
+use crate::app::event::{AppEvent, TrayAction};
+use crate::app::premade::{extract_teams_from_gameflow_session, extract_teams_from_session};
 use crate::app::scout::ScoutService;
 use crate::app::sniper::SniperService;
-use crate::app::premade::{extract_teams_from_gameflow_session, extract_teams_from_session};
+use crate::app::state::RuntimeState;
+use crate::app::viewmodel::ViewModel;
+use crate::lcu::api::{gameflow, LcuClient};
 use crate::win::overlay::OverlaySender;
+use crate::win::winapi;
 
 pub struct MainLoop {
     event_tx: mpsc::Sender<AppEvent>,
@@ -26,7 +26,7 @@ pub struct MainLoop {
     state: Arc<Mutex<RuntimeState>>,
     config: SharedConfig,
     api: Option<LcuClient>,
-    
+
     // 隐藏倒计时
     hide_timer: Option<u32>,
     // 自动接受倒计时
@@ -79,7 +79,7 @@ impl MainLoop {
 
     pub async fn run(&mut self) {
         info!("主逻辑循环已启动");
-        
+
         while let Some(event) = self.event_rx.recv().await {
             match event {
                 AppEvent::LcuConnected(api) => {
@@ -92,7 +92,9 @@ impl MainLoop {
                     self.send_vm(vm);
 
                     // 1. 创建新的 LCU 令牌并启动后台任务
-                    if let Some(token) = self.lcu_token.take() { token.cancel(); }
+                    if let Some(token) = self.lcu_token.take() {
+                        token.cancel();
+                    }
                     let lcu_token = CancellationToken::new();
                     self.lcu_token = Some(lcu_token.clone());
 
@@ -114,10 +116,16 @@ impl MainLoop {
                     warn!("事件处理: LcuDisconnected, 执行清理");
                     self.api = None;
                     self.reset_scout_results();
-                    if let Some(token) = self.lcu_token.take() { token.cancel(); }
-                    if let Some(token) = self.scout_token.take() { token.cancel(); }
-                    if let Some(token) = self.sniper_token.take() { token.cancel(); }
-                    
+                    if let Some(token) = self.lcu_token.take() {
+                        token.cancel();
+                    }
+                    if let Some(token) = self.scout_token.take() {
+                        token.cancel();
+                    }
+                    if let Some(token) = self.sniper_token.take() {
+                        token.cancel();
+                    }
+
                     let mut vm = self.vm_tx.borrow().clone();
                     vm.is_connected = false;
                     vm.current_phase = "Disconnected".to_string();
@@ -155,21 +163,38 @@ impl MainLoop {
                 AppEvent::Tick => {
                     self.handle_tick().await;
                 }
-                AppEvent::ScoutResult { puuid, content, is_premade, is_enemy } => {
-                    self.handle_scout_result(puuid, content, is_premade, is_enemy).await;
+                AppEvent::ScoutResult {
+                    puuid,
+                    content,
+                    is_premade,
+                    is_enemy,
+                } => {
+                    self.handle_scout_result(puuid, content, is_premade, is_enemy)
+                        .await;
                 }
                 AppEvent::RequestWindowFix { zoom, forced } => {
                     if let Some(target) = winapi::find_lcu_window() {
                         winapi::fix_lcu_window_by_zoom(target, zoom, forced);
                         if let Some(r) = winapi::get_window_rect(target) {
                             let _ = self.event_tx.try_send(AppEvent::WindowRectUpdated {
-                                x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top, zoom_scale: zoom
+                                x: r.left,
+                                y: r.top,
+                                width: r.right - r.left,
+                                height: r.bottom - r.top,
+                                zoom_scale: zoom,
                             });
                         }
                     }
                 }
-                AppEvent::WindowRectUpdated { x, y, width, height, zoom_scale } => {
-                    self.update_window_rect(x, y, width, height, zoom_scale).await;
+                AppEvent::WindowRectUpdated {
+                    x,
+                    y,
+                    width,
+                    height,
+                    zoom_scale,
+                } => {
+                    self.update_window_rect(x, y, width, height, zoom_scale)
+                        .await;
                 }
                 AppEvent::Quit => {
                     info!("收到退出信号，终止主循环");
@@ -204,13 +229,17 @@ impl MainLoop {
     }
 
     async fn handle_phase_changed(&mut self, phase: String) {
-        info!("阶段状态转移: {} -> {}", self.vm_tx.borrow().current_phase, phase);
+        info!(
+            "阶段状态转移: {} -> {}",
+            self.vm_tx.borrow().current_phase,
+            phase
+        );
         let mut vm = self.vm_tx.borrow().clone();
         vm.current_phase = phase.clone();
-        
+
         vm.hud2_visible = phase == gameflow::CHAMP_SELECT;
         vm.hud1_visible = true;
-        
+
         // 1. 任务生命周期管理
         if phase != gameflow::CHAMP_SELECT {
             if let Some(token) = self.sniper_token.take() {
@@ -218,14 +247,21 @@ impl MainLoop {
                 token.cancel();
             }
         }
-        
-        let is_in_game_process = phase == gameflow::CHAMP_SELECT || phase == gameflow::IN_PROGRESS || phase == gameflow::GAME_START || phase == gameflow::RECONNECT;
+
+        let is_in_game_process = phase == gameflow::CHAMP_SELECT
+            || phase == gameflow::IN_PROGRESS
+            || phase == gameflow::GAME_START
+            || phase == gameflow::RECONNECT;
         if !is_in_game_process {
             if let Some(token) = self.scout_token.take() {
                 debug!("正在取消战绩分析任务 (非游戏进程)");
                 token.cancel();
             }
-            vm.hud1_title = if phase == gameflow::NONE { "已连接".to_string() } else { format!("当前阶段: {}", phase) };
+            vm.hud1_title = if phase == gameflow::NONE {
+                "已连接".to_string()
+            } else {
+                format!("当前阶段: {}", phase)
+            };
             vm.hud1_lines.clear();
             self.reset_scout_results();
             self.hide_timer = None;
@@ -257,9 +293,9 @@ impl MainLoop {
             if should_analyze {
                 self.start_ingame_scout().await;
             }
-            self.hide_timer = Some(120); 
+            self.hide_timer = Some(120);
         } else if phase == gameflow::CHAMP_SELECT {
-            self.hide_timer = None; 
+            self.hide_timer = None;
         } else if phase == gameflow::END_OF_GAME {
             self.handle_end_of_game().await;
         }
@@ -271,7 +307,7 @@ impl MainLoop {
         if let Some(state) = payload.get("state").and_then(|v| v.as_str()) {
             if state == "InProgress" && self.config.lock().auto_accept_enabled {
                 if self.accept_timer.is_none() {
-                    self.accept_timer = Some(2); 
+                    self.accept_timer = Some(2);
                 }
             } else {
                 self.accept_timer = None;
@@ -313,17 +349,41 @@ impl MainLoop {
                         }
                     }
                 }
-                TrayAction::ReloadUx => { let _ = api.reload_ux().await; }
-                TrayAction::PlayAgain => { let _ = api.play_again().await; }
-                TrayAction::FindForgottenLoot => { 
-                    let api_c = api.clone();
-                    tokio::spawn(async move { crate::app::handlers::handle_find_forgotten_loot(api_c).await; });
+                TrayAction::ReloadUx => {
+                    let _ = api.reload_ux().await;
                 }
-                TrayAction::ToggleAutoAccept => { let mut c = self.config.lock(); c.auto_accept_enabled = !c.auto_accept_enabled; c.save(); }
-                TrayAction::ToggleAutoHonor => { let mut c = self.config.lock(); c.auto_honor_skip = !c.auto_honor_skip; c.save(); }
-                TrayAction::TogglePremadeChamp => { let mut c = self.config.lock(); c.premade_champ_select = !c.premade_champ_select; c.save(); }
-                TrayAction::ToggleMemoryMonitor => { let mut c = self.config.lock(); c.memory_monitor = !c.memory_monitor; c.save(); }
-                TrayAction::Exit => { let _ = self.event_tx.send(AppEvent::Quit).await; }
+                TrayAction::PlayAgain => {
+                    let _ = api.play_again().await;
+                }
+                TrayAction::FindForgottenLoot => {
+                    let api_c = api.clone();
+                    tokio::spawn(async move {
+                        crate::app::handlers::handle_find_forgotten_loot(api_c).await;
+                    });
+                }
+                TrayAction::ToggleAutoAccept => {
+                    let mut c = self.config.lock();
+                    c.auto_accept_enabled = !c.auto_accept_enabled;
+                    c.save();
+                }
+                TrayAction::ToggleAutoHonor => {
+                    let mut c = self.config.lock();
+                    c.auto_honor_skip = !c.auto_honor_skip;
+                    c.save();
+                }
+                TrayAction::TogglePremadeChamp => {
+                    let mut c = self.config.lock();
+                    c.premade_champ_select = !c.premade_champ_select;
+                    c.save();
+                }
+                TrayAction::ToggleMemoryMonitor => {
+                    let mut c = self.config.lock();
+                    c.memory_monitor = !c.memory_monitor;
+                    c.save();
+                }
+                TrayAction::Exit => {
+                    let _ = self.event_tx.send(AppEvent::Quit).await;
+                }
                 _ => {}
             }
         }
@@ -332,15 +392,21 @@ impl MainLoop {
     async fn handle_bench_click(&mut self, index: usize) {
         let (champ_id, already_sniping) = {
             let mut s = self.state.lock();
-            if index >= s.current_bench_ids.len() { return; }
+            if index >= s.current_bench_ids.len() {
+                return;
+            }
             let id = s.current_bench_ids[index];
             let already = s.active_pick_slot == Some(index);
             if already {
                 s.cancel_pick_task();
-                if let Some(token) = self.sniper_token.take() { token.cancel(); }
+                if let Some(token) = self.sniper_token.take() {
+                    token.cancel();
+                }
             } else {
                 s.active_pick_slot = Some(index);
-                if let Some(token) = self.sniper_token.take() { token.cancel(); }
+                if let Some(token) = self.sniper_token.take() {
+                    token.cancel();
+                }
                 self.sniper_token = Some(CancellationToken::new());
             }
             (id, already)
@@ -361,7 +427,9 @@ impl MainLoop {
 
     async fn start_ingame_scout(&mut self) {
         if let (Some(api), true) = (&self.api, self.config.lock().premade_ingame) {
-            if let Some(token) = self.scout_token.take() { token.cancel(); }
+            if let Some(token) = self.scout_token.take() {
+                token.cancel();
+            }
             let token = CancellationToken::new();
             self.scout_token = Some(token.clone());
 
@@ -370,13 +438,20 @@ impl MainLoop {
             tokio::spawn(async move {
                 if let Ok(session) = api_c.get_gameflow_session().await {
                     let me = api_c.get_current_summoner().await.unwrap_or_default();
-                    let my_puuid = me.get("puuid").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                    let my_puuid = me
+                        .get("puuid")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
                     let id_name = api_c.get_champion_id_name_map().await.unwrap_or_default();
-                    let (my_team, their_team, my_side, their_side) = extract_teams_from_gameflow_session(&session, &my_puuid, &id_name);
-                    
+                    let (my_team, their_team, my_side, their_side) =
+                        extract_teams_from_gameflow_session(&session, &my_puuid, &id_name);
+
                     if !my_team.is_empty() {
                         let scout = ScoutService::new(api_c, event_tx_c);
-                        scout.execute_full_scout(my_team, their_team, my_side, their_side, token).await;
+                        scout
+                            .execute_full_scout(my_team, their_team, my_side, their_side, token)
+                            .await;
                     }
                 }
             });
@@ -385,19 +460,27 @@ impl MainLoop {
 
     async fn start_champ_select_scout(&mut self, session: Value) {
         if let (Some(api), true) = (&self.api, self.config.lock().premade_champ_select) {
-            if let Some(token) = self.scout_token.take() { token.cancel(); }
+            if let Some(token) = self.scout_token.take() {
+                token.cancel();
+            }
             let token = CancellationToken::new();
             self.scout_token = Some(token.clone());
 
             let api_c = api.clone();
             let event_tx_c = self.event_tx.clone();
             tokio::spawn(async move {
-                let (my_raw, _their_raw, my_side, their_side) = extract_teams_from_session(&session);
-                let my_team: Vec<(String, String)> = my_raw.iter().map(|(p, n, _)| (p.clone(), n.clone())).collect();
-                
+                let (my_raw, _their_raw, my_side, their_side) =
+                    extract_teams_from_session(&session);
+                let my_team: Vec<(String, String)> = my_raw
+                    .iter()
+                    .map(|(p, n, _)| (p.clone(), n.clone()))
+                    .collect();
+
                 if !my_team.is_empty() {
                     let scout = ScoutService::new(api_c, event_tx_c);
-                    scout.execute_full_scout(my_team, Vec::new(), my_side, their_side, token).await;
+                    scout
+                        .execute_full_scout(my_team, Vec::new(), my_side, their_side, token)
+                        .await;
                 }
             });
         }
@@ -446,7 +529,13 @@ impl MainLoop {
         }
     }
 
-    async fn handle_scout_result(&mut self, puuid: String, content: String, is_premade: bool, is_enemy: bool) {
+    async fn handle_scout_result(
+        &mut self,
+        puuid: String,
+        content: String,
+        is_premade: bool,
+        is_enemy: bool,
+    ) {
         if is_premade {
             self.premade_msg = content;
         } else if is_enemy {
@@ -457,7 +546,9 @@ impl MainLoop {
 
         let mut lines = Vec::new();
         if !self.premade_msg.is_empty() {
-            for line in self.premade_msg.lines() { lines.push(line.to_string()); }
+            for line in self.premade_msg.lines() {
+                lines.push(line.to_string());
+            }
             lines.push(String::new());
         }
         if !self.my_scores.is_empty() {
@@ -482,20 +573,37 @@ impl MainLoop {
     async fn toggle_hud1(&mut self) {
         let mut vm = self.vm_tx.borrow().clone();
         vm.hud1_visible = !vm.hud1_visible;
-        
+
         if vm.hud1_visible {
             let phase = &vm.current_phase;
-            let is_in_game = phase == gameflow::IN_PROGRESS || phase == gameflow::GAME_START || phase == gameflow::RECONNECT;
-            if is_in_game { self.hide_timer = Some(30); } else { self.hide_timer = None; }
+            let is_in_game = phase == gameflow::IN_PROGRESS
+                || phase == gameflow::GAME_START
+                || phase == gameflow::RECONNECT;
+            if is_in_game {
+                self.hide_timer = Some(30);
+            } else {
+                self.hide_timer = None;
+            }
         } else {
             self.hide_timer = None;
         }
         self.send_vm(vm);
     }
 
-    async fn update_window_rect(&mut self, x: i32, y: i32, width: i32, height: i32, zoom_scale: f64) {
+    async fn update_window_rect(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        zoom_scale: f64,
+    ) {
         let mut vm = self.vm_tx.borrow().clone();
-        if vm.lcu_rect.x != x || vm.lcu_rect.y != y || vm.lcu_rect.width != width || vm.lcu_rect.height != height {
+        if vm.lcu_rect.x != x
+            || vm.lcu_rect.y != y
+            || vm.lcu_rect.width != width
+            || vm.lcu_rect.height != height
+        {
             vm.lcu_rect.x = x;
             vm.lcu_rect.y = y;
             vm.lcu_rect.width = width;

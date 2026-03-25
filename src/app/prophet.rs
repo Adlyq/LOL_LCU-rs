@@ -11,13 +11,21 @@ const RECENT_WEIGHT: f64 = 0.8;
 const OLD_WEIGHT: f64 = 0.2;
 
 pub fn get_grade_name(score: f64) -> &'static str {
-    if score >= 180.0 { "通天代" }
-    else if score >= 150.0 { "小代" }
-    else if score >= 125.0 { "上等马" }
-    else if score >= 105.0 { "中等马" }
-    else if score >= 95.0 { "下等马" }
-    else if score >= 80.0 { "纯牛马" }
-    else { "没有马" }
+    if score >= 180.0 {
+        "通天代"
+    } else if score >= 150.0 {
+        "小代"
+    } else if score >= 125.0 {
+        "上等马"
+    } else if score >= 105.0 {
+        "中等马"
+    } else if score >= 95.0 {
+        "下等马"
+    } else if score >= 80.0 {
+        "纯牛马"
+    } else {
+        "没有马"
+    }
 }
 
 // ── 数据模型 ─────────────────────────────────────────────────────
@@ -41,7 +49,9 @@ struct RawMatchStats {
 // ── 核心逻辑 ─────────────────────────────────────────────────────
 
 pub fn calculate_player_rating(puuid: &str, matches: &[Value]) -> Option<PlayerPerformance> {
-    if matches.is_empty() { return None; }
+    if matches.is_empty() {
+        return None;
+    }
 
     let mut match_results = Vec::new();
     let mut total_kda = 0.0;
@@ -60,36 +70,65 @@ pub fn calculate_player_rating(puuid: &str, matches: &[Value]) -> Option<PlayerP
         let identities = m.get("participantIdentities").and_then(|v| v.as_array())?;
 
         // 找到目标玩家的 participantId
-        let pid = identities.iter().find(|id| {
-            id.get("player").and_then(|p| p.get("puuid")).and_then(|p| p.as_str()) == Some(puuid)
-        })?.get("participantId")?.as_i64()?;
+        let pid = identities
+            .iter()
+            .find(|id| {
+                id.get("player")
+                    .and_then(|p| p.get("puuid"))
+                    .and_then(|p| p.as_str())
+                    == Some(puuid)
+            })?
+            .get("participantId")?
+            .as_i64()?;
 
         // 找到目标玩家的 stats
-        let me = participants.iter().find(|p| p.get("participantId").and_then(|v| v.as_i64()) == Some(pid))?;
+        let me = participants
+            .iter()
+            .find(|p| p.get("participantId").and_then(|v| v.as_i64()) == Some(pid))?;
         let stats = me.get("stats")?;
-        
+
         let win = stats.get("win").and_then(|v| v.as_bool()).unwrap_or(false);
         let kills = stats.get("kills").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let deaths = stats.get("deaths").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let assists = stats.get("assists").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        
+
         // 计算该场基础分
         let mut score = BASE_SCORE;
-        
+
         // KDA 计算
         let kda = (kills + assists) / deaths.max(1.0);
         total_kda += kda;
-        if win { wins += 1.0; }
+        if win {
+            wins += 1.0;
+        }
         valid_count += 1;
 
         // 简化的评分逻辑（对应 JS 的核心思想）
         score += kda * 5.0; // KDA 贡献
-        if stats.get("firstBloodKill").and_then(|v| v.as_bool()).unwrap_or(false) { score += 10.0; }
-        
+        if stats
+            .get("firstBloodKill")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            score += 10.0;
+        }
+
         // 多杀奖励
-        score += stats.get("tripleKills").and_then(|v| v.as_i64()).unwrap_or(0) as f64 * 5.0;
-        score += stats.get("quadraKills").and_then(|v| v.as_i64()).unwrap_or(0) as f64 * 10.0;
-        score += stats.get("pentaKills").and_then(|v| v.as_i64()).unwrap_or(0) as f64 * 20.0;
+        score += stats
+            .get("tripleKills")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as f64
+            * 5.0;
+        score += stats
+            .get("quadraKills")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as f64
+            * 10.0;
+        score += stats
+            .get("pentaKills")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as f64
+            * 20.0;
 
         match_results.push(RawMatchStats {
             is_recent: (now_ms - game_creation) < RECENT_WINDOW_MS,
@@ -97,7 +136,9 @@ pub fn calculate_player_rating(puuid: &str, matches: &[Value]) -> Option<PlayerP
         });
     }
 
-    if valid_count == 0 { return None; }
+    if valid_count == 0 {
+        return None;
+    }
 
     // 按权重合并分数
     let recent: Vec<_> = match_results.iter().filter(|m| m.is_recent).collect();

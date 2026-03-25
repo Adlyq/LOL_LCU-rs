@@ -13,7 +13,7 @@ use std::os::windows::ffi::OsStrExt;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, UpdateWindow,
+    RedrawWindow, UpdateWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -33,7 +33,9 @@ fn get_window_title(hwnd: HWND) -> String {
         }
         let mut buf: Vec<u16> = vec![0u16; (len + 1) as usize];
         GetWindowTextW(hwnd, &mut buf);
-        String::from_utf16_lossy(&buf[..len as usize]).trim().to_owned()
+        String::from_utf16_lossy(&buf[..len as usize])
+            .trim()
+            .to_owned()
     }
 }
 
@@ -49,11 +51,16 @@ pub fn find_lcu_window() -> Option<HWND> {
     unsafe {
         let class = to_wide("RCLIENT");
         let title = to_wide("League of Legends");
-        
+
         // 尝试查找所有 RCLIENT 窗口，直到找到可见的那一个
         let mut current_hwnd = HWND::default();
         loop {
-            current_hwnd = match FindWindowExW(HWND::default(), current_hwnd, PCWSTR(class.as_ptr()), PCWSTR(title.as_ptr())) {
+            current_hwnd = match FindWindowExW(
+                HWND::default(),
+                current_hwnd,
+                PCWSTR(class.as_ptr()),
+                PCWSTR(title.as_ptr()),
+            ) {
                 Ok(h) if !h.is_invalid() => h,
                 _ => break,
             };
@@ -144,11 +151,7 @@ pub fn redraw_window(hwnd: HWND) -> bool {
             0,
             0,
             0,
-            SWP_NOMOVE
-                | SWP_NOSIZE
-                | SWP_NOZORDER
-                | SWP_NOACTIVATE
-                | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
         let rdw_ok = RedrawWindow(
             hwnd,
@@ -207,7 +210,14 @@ pub fn patch_dpi_changed_message(hwnd: HWND) {
 }
 
 /// SetWindowPos 封装。
-pub fn set_window_pos(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, flags: SET_WINDOW_POS_FLAGS) -> bool {
+pub fn set_window_pos(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    flags: SET_WINDOW_POS_FLAGS,
+) -> bool {
     if hwnd.is_invalid() {
         return false;
     }
@@ -263,10 +273,7 @@ pub fn place_window_above_target(hwnd: HWND, target_hwnd: HWND, rect: &RECT) -> 
 pub fn set_window_opacity_by_title(title: &str, percent: u8) -> bool {
     unsafe {
         let title_wide = to_wide(title);
-        let hwnd = match FindWindowW(
-            PCWSTR::null(),
-            PCWSTR(title_wide.as_ptr()),
-        ) {
+        let hwnd = match FindWindowW(PCWSTR::null(), PCWSTR(title_wide.as_ptr())) {
             Ok(h) if !h.is_invalid() => h,
             _ => return false,
         };
@@ -282,7 +289,7 @@ pub fn set_window_opacity(hwnd: HWND, percent: u8) -> bool {
     unsafe {
         let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
         if SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as i32) == 0 {
-             // 检查错误？有些窗口可能不支持，但在 Windows 上通常 ok
+            // 检查错误？有些窗口可能不支持，但在 Windows 上通常 ok
         }
         let alpha = (percent.clamp(30, 100) as f32 / 100.0 * 255.0) as u8;
         SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA).is_ok()
@@ -396,7 +403,11 @@ pub fn find_child_window_recursive(hwnd: HWND, class_name_substring: &str) -> Op
     };
 
     unsafe {
-        let _ = EnumChildWindows(hwnd, Some(enum_proc), LPARAM(&mut ctx as *mut EnumCtx as isize));
+        let _ = EnumChildWindows(
+            hwnd,
+            Some(enum_proc),
+            LPARAM(&mut ctx as *mut EnumCtx as isize),
+        );
     }
 
     ctx.found
@@ -417,7 +428,15 @@ pub unsafe fn align_all_cef_windows(parent: HWND) {
             let mut pr = RECT::default();
             if GetClientRect(parent, &mut pr).is_ok() {
                 // 强制对齐并移除同步标志以提高响应速度
-                let _ = SetWindowPos(child, HWND::default(), 0, 0, pr.right, pr.bottom, SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS | SWP_DEFERERASE);
+                let _ = SetWindowPos(
+                    child,
+                    HWND::default(),
+                    0,
+                    0,
+                    pr.right,
+                    pr.bottom,
+                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS | SWP_DEFERERASE,
+                );
             }
         }
         align_all_cef_windows(child);
@@ -428,7 +447,9 @@ pub unsafe fn align_all_cef_windows(parent: HWND) {
 fn get_window_class(hwnd: HWND) -> String {
     let mut buf = [0u16; 256];
     let len = unsafe { GetClassNameW(hwnd, &mut buf) };
-    if len == 0 { return String::new(); }
+    if len == 0 {
+        return String::new();
+    }
     String::from_utf16_lossy(&buf[..len as usize])
 }
 
@@ -442,8 +463,16 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
     // 1. 获取窗口句柄
     // fix-lcu-window 原版仅使用 FindWindowEx (仅查找直接子窗口)
     let class_cef = to_wide("CefBrowserWindow");
-    let mut cef = unsafe { FindWindowExW(hwnd, HWND::default(), PCWSTR(class_cef.as_ptr()), PCWSTR::null()).unwrap_or_default() };
-    
+    let mut cef = unsafe {
+        FindWindowExW(
+            hwnd,
+            HWND::default(),
+            PCWSTR(class_cef.as_ptr()),
+            PCWSTR::null(),
+        )
+        .unwrap_or_default()
+    };
+
     // [兼容性补丁]: 某些版本 LCU 窗口结构存在嵌套，若直接查找失败则尝试递归查找
     if cef.is_invalid() {
         cef = find_child_window_recursive(hwnd, "CefBrowserWindow").unwrap_or_default();
@@ -488,7 +517,7 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
 
     // 6. 强制设置窗口位置与大小 (SWP_SHOWWINDOW = 0x0040)
     const SWP_SHOWWINDOW: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(0x0040);
-    
+
     // 主窗口：居中屏幕
     let main_ok = set_window_pos(hwnd, target_x, target_y, target_w, target_h, SWP_SHOWWINDOW);
 
@@ -499,7 +528,7 @@ pub fn fix_lcu_window_by_zoom(hwnd: HWND, zoom_scale: f64, forced: bool) -> bool
     unsafe {
         align_all_cef_windows(hwnd);
     }
-    
+
     redraw_window(hwnd);
     redraw_window(cef);
 

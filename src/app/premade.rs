@@ -30,8 +30,18 @@ pub struct PremadeGroup {
     pub times: usize,
 }
 
-type ChampSelectTeamData = (Vec<(String, String, i64)>, Vec<(String, String, i64)>, Option<u32>, Option<u32>);
-type GameflowTeamData = (Vec<(String, String)>, Vec<(String, String)>, Option<u32>, Option<u32>);
+type ChampSelectTeamData = (
+    Vec<(String, String, i64)>,
+    Vec<(String, String, i64)>,
+    Option<u32>,
+    Option<u32>,
+);
+type GameflowTeamData = (
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+    Option<u32>,
+    Option<u32>,
+);
 
 // ── 分析入口 ──────────────────────────────────────────────────────
 
@@ -47,7 +57,8 @@ pub async fn analyze_premade(
     threshold: usize,
     history_count: usize,
 ) -> (TeamPremade, TeamPremade) {
-    let all_players: Vec<(String, String)> = my_team.iter().chain(their_team.iter()).cloned().collect();
+    let all_players: Vec<(String, String)> =
+        my_team.iter().chain(their_team.iter()).cloned().collect();
 
     // 1. 批量拉取所有玩家的历史战绩（GameID -> Win）
     let histories = fetch_all_player_game_histories(api, &all_players, history_count).await;
@@ -82,7 +93,11 @@ async fn fetch_all_player_game_histories(
     while let Some(Ok((puuid, map_res))) = set.join_next().await {
         match map_res {
             Ok(map) => {
-                debug!("PUUID={} 战绩拉取完成，共 {} 场", &puuid[..8.min(puuid.len())], map.len());
+                debug!(
+                    "PUUID={} 战绩拉取完成，共 {} 场",
+                    &puuid[..8.min(puuid.len())],
+                    map.len()
+                );
                 result.insert(puuid, map);
             }
             Err(e) => {
@@ -101,10 +116,17 @@ async fn fetch_player_game_id_win_map(
     count: usize,
 ) -> Result<HashMap<i64, bool>, LcuApiError> {
     let raw = api.get_match_history(puuid, count).await?;
-    
+
     // 兼容多种 LCU 响应格式
-    let games = raw.get("games")
-        .and_then(|v| if v.is_array() { Some(v) } else { v.get("games") })
+    let games = raw
+        .get("games")
+        .and_then(|v| {
+            if v.is_array() {
+                Some(v)
+            } else {
+                v.get("games")
+            }
+        })
         .and_then(|v| v.as_array());
 
     let Some(games_arr) = games else {
@@ -115,7 +137,8 @@ async fn fetch_player_game_id_win_map(
     for g in games_arr {
         if let Some(game_id) = g.get("gameId").and_then(|v| v.as_i64()) {
             // 战绩摘要中，participants[0] 通常就是该 PUUID 本人的数据
-            let win = g.get("participants")
+            let win = g
+                .get("participants")
                 .and_then(|v| v.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|p| p.get("stats"))
@@ -138,7 +161,10 @@ fn calc_inferred_premade(
     threshold: usize,
 ) -> TeamPremade {
     if team.len() < 2 {
-        return TeamPremade { team_name: team_name.to_owned(), groups: vec![] };
+        return TeamPremade {
+            team_name: team_name.to_owned(),
+            groups: vec![],
+        };
     }
 
     // 1. 计算两两玩家之间的共同对局次数（且胜负一致）
@@ -148,10 +174,7 @@ fn calc_inferred_premade(
             let (puuid_a, _) = &team[i];
             let (puuid_b, _) = &team[j];
 
-            let count = count_common_games(
-                histories.get(puuid_a),
-                histories.get(puuid_b)
-            );
+            let count = count_common_games(histories.get(puuid_a), histories.get(puuid_b));
 
             if count >= threshold {
                 edges.push((i, j, count));
@@ -160,13 +183,18 @@ fn calc_inferred_premade(
     }
 
     if edges.is_empty() {
-        return TeamPremade { team_name: team_name.to_owned(), groups: vec![] };
+        return TeamPremade {
+            team_name: team_name.to_owned(),
+            groups: vec![],
+        };
     }
 
     // 2. 使用并查集进行分组
     let mut parent: Vec<usize> = (0..team.len()).collect();
     fn find(p: &mut Vec<usize>, i: usize) -> usize {
-        if p[i] == i { i } else {
+        if p[i] == i {
+            i
+        } else {
             let root = find(p, p[i]);
             p[i] = root;
             root
@@ -175,7 +203,9 @@ fn calc_inferred_premade(
     fn union(p: &mut Vec<usize>, i: usize, j: usize) {
         let root_i = find(p, i);
         let root_j = find(p, j);
-        if root_i != root_j { p[root_i] = root_j; }
+        if root_i != root_j {
+            p[root_i] = root_j;
+        }
     }
 
     for (i, j, _) in &edges {
@@ -193,8 +223,10 @@ fn calc_inferred_premade(
     // 计算组内最小公共次数作为该组的 "times"
     let mut final_groups = Vec::new();
     for (root, (mut names, _)) in groups_map {
-        if names.len() < 2 { continue; }
-        
+        if names.len() < 2 {
+            continue;
+        }
+
         // 查找属于该组的所有边，取最小值（由于并查集保证了连通性，这里简单处理）
         let mut min_times = 999;
         let mut found_edge = false;
@@ -221,11 +253,10 @@ fn calc_inferred_premade(
 }
 
 /// 计算两个玩家共同出现在同一场对局且胜负一致的次数。
-fn count_common_games(
-    a: Option<&HashMap<i64, bool>>,
-    b: Option<&HashMap<i64, bool>>,
-) -> usize {
-    let (Some(map_a), Some(map_b)) = (a, b) else { return 0; };
+fn count_common_games(a: Option<&HashMap<i64, bool>>, b: Option<&HashMap<i64, bool>>) -> usize {
+    let (Some(map_a), Some(map_b)) = (a, b) else {
+        return 0;
+    };
     let mut count = 0;
     for (game_id, win_a) in map_a {
         if let Some(win_b) = map_b.get(game_id) {
@@ -239,33 +270,54 @@ fn count_common_games(
 
 // ── Session 提取工具 ──────────────────────────────────────────────
 
-pub fn extract_teams_from_session(
-    session: &Value,
-) -> ChampSelectTeamData {
+pub fn extract_teams_from_session(session: &Value) -> ChampSelectTeamData {
     let extract = |key: &str| -> Vec<(String, String, i64)> {
         let players_val = session.get(key).and_then(|v| v.as_array());
         let mut result = Vec::new();
-        
+
         if let Some(arr) = players_val {
             for p in arr {
                 // LeagueAkari 实践：优先使用 puuid，若无则使用 summonerId 作为唯一标识
-                let puuid_raw = p.get("puuid").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                let puuid_raw = p
+                    .get("puuid")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
                     .map(|s| s.to_owned())
-                    .or_else(|| p.get("summonerId").and_then(|v| v.as_i64()).map(|id| id.to_string()));
-                
+                    .or_else(|| {
+                        p.get("summonerId")
+                            .and_then(|v| v.as_i64())
+                            .map(|id| id.to_string())
+                    });
+
                 let Some(puuid) = puuid_raw else {
                     continue;
                 };
 
-                let game_name = p.get("gameName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                let tag_line = p.get("tagLine").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                let display_name = p.get("displayName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                let summoner_name = p.get("summonerName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                let game_name = p
+                    .get("gameName")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let tag_line = p
+                    .get("tagLine")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let display_name = p
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let summoner_name = p
+                    .get("summonerName")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
 
                 // 优先级：GameName#Tag > DisplayName > SummonerName
                 // 在 Anonymous 模式下，DisplayName 可能是 "Summoner 1"，但 PUUID 依然是真实的
                 let name = if let Some(gn) = game_name {
-                    if let Some(tl) = tag_line { format!("{}#{}", gn, tl) } else { gn.to_owned() }
+                    if let Some(tl) = tag_line {
+                        format!("{}#{}", gn, tl)
+                    } else {
+                        gn.to_owned()
+                    }
                 } else if let Some(dn) = display_name {
                     dn.to_owned()
                 } else if let Some(sn) = summoner_name {
@@ -274,9 +326,13 @@ pub fn extract_teams_from_session(
                     "召唤师".to_owned()
                 };
 
-                let champ_id = p.get("championId").and_then(|v| v.as_i64()).filter(|&id| id != 0)
-                    .or_else(|| p.get("championPickIntent").and_then(|v| v.as_i64())).unwrap_or(0);
-                
+                let champ_id = p
+                    .get("championId")
+                    .and_then(|v| v.as_i64())
+                    .filter(|&id| id != 0)
+                    .or_else(|| p.get("championPickIntent").and_then(|v| v.as_i64()))
+                    .unwrap_or(0);
+
                 result.push((puuid, name, champ_id));
             }
         }
@@ -284,12 +340,24 @@ pub fn extract_teams_from_session(
     };
     let my_team = extract("myTeam");
     let their_team = extract("theirTeam");
-    
+
     // 额外补偿：如果 myTeam 为空，尝试从 localPlayerCellId 所在的团队提取
     //（在某些极少数 LCU 异常状态下有效）
-    
-    let my_side = session.get("myTeam").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
-    let their_side = session.get("theirTeam").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|p| p.get("team")).and_then(|v| v.as_u64()).map(|v| v as u32);
+
+    let my_side = session
+        .get("myTeam")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|p| p.get("team"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    let their_side = session
+        .get("theirTeam")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|p| p.get("team"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
     (my_team, their_team, my_side, their_side)
 }
 
@@ -301,26 +369,48 @@ pub fn extract_teams_from_gameflow_session(
     id_name_map: &HashMap<i64, String>,
 ) -> GameflowTeamData {
     let game_data = session.get("gameData").unwrap_or(session);
-    
+
     let extract_team = |key: &str| -> Vec<(String, String)> {
         let players_val = game_data.get(key).and_then(|v| v.as_array());
         let mut result = Vec::new();
 
         if let Some(arr) = players_val {
             for p in arr {
-                let puuid_raw = p.get("puuid").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                let puuid_raw = p
+                    .get("puuid")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
                     .map(|s| s.to_owned())
-                    .or_else(|| p.get("summonerId").and_then(|v| v.as_i64()).map(|id| id.to_string()));
+                    .or_else(|| {
+                        p.get("summonerId")
+                            .and_then(|v| v.as_i64())
+                            .map(|id| id.to_string())
+                    });
 
-                let Some(puuid) = puuid_raw else { continue; };
+                let Some(puuid) = puuid_raw else {
+                    continue;
+                };
 
                 // 优先顺序：GameName#Tag > DisplayName > "召唤师"
-                let game_name = p.get("gameName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                let tag_line = p.get("tagLine").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                let display_name = p.get("displayName").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                
+                let game_name = p
+                    .get("gameName")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let tag_line = p
+                    .get("tagLine")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let display_name = p
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+
                 let name = if let Some(gn) = game_name {
-                    if let Some(tl) = tag_line { format!("{}#{}", gn, tl) } else { gn.to_owned() }
+                    if let Some(tl) = tag_line {
+                        format!("{}#{}", gn, tl)
+                    } else {
+                        gn.to_owned()
+                    }
                 } else if let Some(dn) = display_name {
                     dn.to_owned()
                 } else {
@@ -330,15 +420,19 @@ pub fn extract_teams_from_gameflow_session(
                 // 附加英雄名称标签
                 let champ_id = p.get("championId").and_then(|v| v.as_i64()).unwrap_or(0);
                 let label = if champ_id != 0 {
-                    if let Some(cname) = id_name_map.get(&champ_id) { 
-                        if name == "召唤师" || name.starts_with("Summoner ") { 
-                            cname.clone() 
-                        } else { 
-                            format!("{}({})", name, cname) 
+                    if let Some(cname) = id_name_map.get(&champ_id) {
+                        if name == "召唤师" || name.starts_with("Summoner ") {
+                            cname.clone()
+                        } else {
+                            format!("{}({})", name, cname)
                         }
-                    } else { name }
-                } else { name };
-                
+                    } else {
+                        name
+                    }
+                } else {
+                    name
+                };
+
                 result.push((puuid, label));
             }
         }
@@ -349,19 +443,28 @@ pub fn extract_teams_from_gameflow_session(
     let mut t2 = extract_team("teamTwo");
 
     // --- 补偿逻辑 (LeagueAkari 实践) ---
-    
+
     // 1. 补全 localPlayer：LCU 的 teamOne/teamTwo 在某些特定时刻（如刚进入游戏）会漏掉自己
     if let Some(lp) = game_data.get("localPlayer") {
-        let lp_puuid = lp.get("puuid").and_then(|v| v.as_str()).map(|s| s.to_owned());
+        let lp_puuid = lp
+            .get("puuid")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned());
         if let Some(p_id) = lp_puuid {
             if !t1.iter().any(|(p, _)| p == &p_id) && !t2.iter().any(|(p, _)| p == &p_id) {
                 let team_id = lp.get("teamId").and_then(|v| v.as_i64()).unwrap_or(0);
                 let champ_id = lp.get("championId").and_then(|v| v.as_i64()).unwrap_or(0);
-                let champ_name = id_name_map.get(&champ_id).cloned().unwrap_or_else(|| "本地召唤师".into());
-                
+                let champ_name = id_name_map
+                    .get(&champ_id)
+                    .cloned()
+                    .unwrap_or_else(|| "本地召唤师".into());
+
                 // 根据 teamId 分配 (100: TeamOne/Blue, 200: TeamTwo/Red)
-                if team_id == 100 { t1.push((p_id, champ_name)); }
-                else { t2.push((p_id, champ_name)); }
+                if team_id == 100 {
+                    t1.push((p_id, champ_name));
+                } else {
+                    t2.push((p_id, champ_name));
+                }
             }
         }
     }
@@ -390,22 +493,43 @@ pub fn format_premade_message(
     my_side: Option<u32>,
     their_side: Option<u32>,
 ) -> String {
-    let side_label = |s| match s { Some(100) => "[蓝方]", Some(200) => "[红方]", _ => "" };
-    
+    let side_label = |s| match s {
+        Some(100) => "[蓝方]",
+        Some(200) => "[红方]",
+        _ => "",
+    };
+
     let fmt_t = |t: &TeamPremade, _s| {
-        if t.groups.is_empty() { return None; }
+        if t.groups.is_empty() {
+            return None;
+        }
         // 这里的头不再包含蓝红队字样，因为已经提到总标题了
         let head = format!("{}", t.team_name);
-        let g_strs: Vec<String> = t.groups.iter().map(|g| format!("  {}黑（{}局）：{}", g.summoner_names.len(), g.times, g.summoner_names.join(" / "))).collect();
+        let g_strs: Vec<String> = t
+            .groups
+            .iter()
+            .map(|g| {
+                format!(
+                    "  {}黑（{}局）：{}",
+                    g.summoner_names.len(),
+                    g.times,
+                    g.summoner_names.join(" / ")
+                )
+            })
+            .collect();
         Some(format!("{}：\n{}", head, g_strs.join("\n")))
     };
 
     // 标题始终带上我方的阵营标识
     let title = format!("[对局组黑分析] {}", side_label(my_side));
     let mut parts = vec![title];
-    
-    if let Some(m) = fmt_t(my_team, my_side) { parts.push(m); }
-    if let Some(t) = fmt_t(their_team, their_side) { parts.push(t); }
+
+    if let Some(m) = fmt_t(my_team, my_side) {
+        parts.push(m);
+    }
+    if let Some(t) = fmt_t(their_team, their_side) {
+        parts.push(t);
+    }
 
     if parts.len() == 1 {
         // 如果双方都没组黑
