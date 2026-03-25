@@ -12,12 +12,22 @@ use crate::win::overlay::WndState;
 // 布局常量 (1920x1080 模板)
 const TEMPLATE_W: f64 = 1920.0;
 const TEMPLATE_H: f64 = 1080.0;
-const BENCH_L: f64 = 528.0;
-const BENCH_T: f64 = 14.0;
-const BENCH_R: f64 = 1392.0;
-const BENCH_B: f64 = 90.0;
+
+const SLOT_START_X: f64 = 528.0;
+const SLOT_START_Y: f64 = 17.0;
 const SLOT_SIZE: f64 = 70.0;
+const SLOT_GAP: f64 = 16.4;
+const SLOTS_PADDING_H: f64 = 3.0;
+const SLOTS_PADDING_V: f64 = 3.0;
 const BENCH_SLOT_COUNT: usize = 10;
+const BENCH_L: f64 = SLOT_START_X - SLOTS_PADDING_H;
+const BENCH_T: f64 = SLOT_START_Y - SLOTS_PADDING_V;
+const BENCH_W: f64 = SLOT_SIZE * BENCH_SLOT_COUNT as f64
+    + SLOT_GAP * (BENCH_SLOT_COUNT as f64 - 1.0)
+    + SLOTS_PADDING_H * 2.0;
+const BENCH_H: f64 = SLOT_SIZE + SLOTS_PADDING_V * 2.0;
+const BENCH_R: f64 = BENCH_L + BENCH_W;
+const BENCH_B: f64 = BENCH_T + BENCH_H;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FRect {
@@ -88,18 +98,30 @@ pub fn get_bench_container_rect(win_w: i32, win_h: i32) -> FRect {
         h: (BENCH_B - BENCH_T) * scale_y,
     }
 }
-
+// const SLOT_START_X: f64 = 528.0;
+// const SLOT_START_Y: f64 = 17.0;
+// const SLOT_SIZE: f64 = 70.0;
+// const SLOT_GAP: f64 = 16.4;
+// const SLOTS_PADDING_H: f64 = 3.0;
+// const SLOTS_PADDING_V: f64 = 3.0;
+// const BENCH_SLOT_COUNT: usize = 10;
+// const BENCH_L: f64 = SLOT_START_X - SLOTS_PADDING_H;
+// const BENCH_T: f64 = SLOT_START_Y - SLOTS_PADDING_V;
+// const BENCH_W: f64 = SLOT_SIZE * BENCH_SLOT_COUNT as f64
+//     + SLOT_GAP * (BENCH_SLOT_COUNT as f64 - 1.0)
+//     + SLOTS_PADDING_H * 2.0;
+// const BENCH_H: f64 = SLOT_SIZE + SLOTS_PADDING_V * 2.0;
+// const BENCH_R: f64 = BENCH_L + BENCH_W;
+// const BENCH_B: f64 = BENCH_T + BENCH_H;
 pub fn get_slot_rect(index: usize, container: FRect, win_w: i32, win_h: i32) -> FRect {
     let scale_x = win_w as f64 / TEMPLATE_W;
     let scale_y = win_h as f64 / TEMPLATE_H;
-    let scale = f64::min(scale_x, scale_y);
-    let slot_w = SLOT_SIZE * scale;
-    let slot_h = SLOT_SIZE * scale;
-    let edge_inset = f64::max(0.0, 1.5 * scale);
+    let slot_w = SLOT_SIZE * scale_x;
+    let slot_h = SLOT_SIZE * scale_y;
 
     FRect {
-        x: container.x + (index as f64 * (slot_w + edge_inset)),
-        y: container.y,
+        x: container.x + SLOTS_PADDING_H * scale_x + (index as f64 * (slot_w + SLOT_GAP * scale_x)),
+        y: container.y + SLOTS_PADDING_V * scale_y,
         w: slot_w,
         h: slot_h,
     }
@@ -109,12 +131,35 @@ fn hit_slot(px: f64, py: f64, state: &WndState) -> Option<usize> {
     if !state.vm.hud2_visible {
         return None;
     }
-    let container = get_bench_container_rect(state.win_w, state.win_h);
-    if !container.contains(px, py) {
+    // 使用 LCU 实际尺寸计算参考容器
+    let lcu_w = state.win_w;
+    let lcu_h = state.win_h;
+    if lcu_w <= 0 || lcu_h <= 0 {
         return None;
     }
+
+    let full_container = get_bench_container_rect(lcu_w, lcu_h);
+    // 局部坐标系中，容器起始于 (0,0)
+    let local_container = FRect {
+        x: 0.0,
+        y: 0.0,
+        w: full_container.w,
+        h: full_container.h,
+    };
+
+    if !local_container.contains(px, py) {
+        return None;
+    }
+
     for i in 0..BENCH_SLOT_COUNT {
-        if get_slot_rect(i, container, state.win_w, state.win_h).contains(px, py) {
+        let sr_full = get_slot_rect(i, full_container, lcu_w, lcu_h);
+        let sr = FRect {
+            x: sr_full.x - full_container.x,
+            y: sr_full.y - full_container.y,
+            w: sr_full.w,
+            h: sr_full.h,
+        };
+        if sr.contains(px, py) {
             return Some(i);
         }
     }
@@ -125,9 +170,16 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     trace!("渲染 HUD2 (板凳席交互层)");
     let mut rect = RECT::default();
     let _ = GetWindowRect(hwnd, &mut rect);
-    let win_w = rect.right - rect.left;
-    let win_h = rect.bottom - rect.top;
-    if win_w <= 0 || win_h <= 0 {
+    let hud_w = rect.right - rect.left;
+    let hud_h = rect.bottom - rect.top;
+    if hud_w <= 0 || hud_h <= 0 {
+        return;
+    }
+
+    // 使用 LCU 实际尺寸计算缩放，而不是 HUD2 窗口自身尺寸
+    let lcu_w = state.win_w;
+    let lcu_h = state.win_h;
+    if lcu_w <= 0 || lcu_h <= 0 {
         return;
     }
 
@@ -136,8 +188,8 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
 
     let bi = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: win_w,
-        biHeight: -win_h,
+        biWidth: hud_w,
+        biHeight: -hud_h,
         biPlanes: 1,
         biBitCount: 32,
         biCompression: BI_RGB.0,
@@ -159,25 +211,32 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     let old_bm = SelectObject(hdc_mem, hbm);
 
     // 初始化全透明
-    std::ptr::write_bytes(bits_ptr, 0, (win_w * win_h * 4) as usize);
-    let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (win_w * win_h) as usize);
+    std::ptr::write_bytes(bits_ptr, 0, (hud_w * hud_h * 4) as usize);
+    let pixels = std::slice::from_raw_parts_mut(bits_ptr as *mut u32, (hud_w * hud_h) as usize);
 
     if state.vm.hud2_visible {
-        let container = get_bench_container_rect(win_w, win_h);
-        let scale_y = win_h as f64 / TEMPLATE_H;
+        // 在 HUD2 内部绘图时，容器相对于自身的坐标应为 (0,0)
+        let full_container = get_bench_container_rect(lcu_w, lcu_h);
+        let local_container = FRect {
+            x: 0.0,
+            y: 0.0,
+            w: full_container.w,
+            h: full_container.h,
+        };
+        let scale_y = lcu_h as f64 / TEMPLATE_H;
 
         // 填充容器背景 (Alpha=2)
-        fill_rect_alpha(pixels, win_w, win_h, container, 0, 0, 0, 2);
+        fill_rect_alpha(pixels, hud_w, hud_h, local_container, 0, 0, 0, 2);
 
         let pen_gray = CreatePen(PS_SOLID, 1, rgb(128, 128, 128));
         let old_pen = SelectObject(hdc_mem, pen_gray);
         let old_brush = SelectObject(hdc_mem, GetStockObject(NULL_BRUSH));
         let _ = RoundRect(
             hdc_mem,
-            container.x as i32,
-            container.y as i32,
-            container.right() as i32,
-            container.bottom() as i32,
+            local_container.x as i32,
+            local_container.y as i32,
+            local_container.right() as i32,
+            local_container.bottom() as i32,
             (10.0 * scale_y) as i32,
             (10.0 * scale_y) as i32,
         );
@@ -185,11 +244,19 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
         let pen_slot = CreatePen(PS_SOLID, 1, rgb(160, 160, 160));
         SelectObject(hdc_mem, pen_slot);
         for i in 0..BENCH_SLOT_COUNT {
-            let sr = get_slot_rect(i, container, win_w, win_h);
+            // 获取相对于 LCU 整体的槽位矩形，然后转换到局部坐标
+            let sr_full = get_slot_rect(i, full_container, lcu_w, lcu_h);
+            let sr = FRect {
+                x: sr_full.x - full_container.x,
+                y: sr_full.y - full_container.y,
+                w: sr_full.w,
+                h: sr_full.h,
+            };
+
             if state.vm.hud2_selected_slot == Some(i) {
-                fill_rect_alpha(pixels, win_w, win_h, sr, 130, 255, 130, 65);
+                fill_rect_alpha(pixels, hud_w, hud_h, sr, 130, 255, 130, 65);
             } else {
-                fill_rect_alpha(pixels, win_w, win_h, sr, 0, 0, 0, 2);
+                fill_rect_alpha(pixels, hud_w, hud_h, sr, 0, 0, 0, 2);
             }
             let _ = RoundRect(
                 hdc_mem,
@@ -214,8 +281,8 @@ pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
     };
     let pt_src = POINT { x: 0, y: 0 };
     let size_dst = SIZE {
-        cx: win_w,
-        cy: win_h,
+        cx: hud_w,
+        cy: hud_h,
     };
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,

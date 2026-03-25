@@ -19,10 +19,11 @@ use super::connection::LcuCredentials;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LcuEvent {
-    pub opcode: String,
-    pub event_type: String,
     pub uri: String,
+    #[serde(rename = "data")]
     pub payload: Value,
+    #[serde(rename = "eventType")]
+    pub event_type: String,
 }
 
 pub struct WsHandle {

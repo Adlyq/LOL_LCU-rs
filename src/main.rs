@@ -192,7 +192,6 @@ async fn connection_monitor_loop(event_tx: mpsc::Sender<crate::app::event::AppEv
                     crate::lcu::websocket::LcuEvent {
                         uri: "/lol-gameflow/v1/gameflow-phase".to_string(),
                         payload: serde_json::Value::String(phase),
-                        opcode: "InitialSync".to_string(),
                         event_type: "Update".to_string(),
                     },
                 ))
