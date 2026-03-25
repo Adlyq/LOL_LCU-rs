@@ -4,10 +4,10 @@
 //! - `WsLoop` 持有一个 `tokio::sync::broadcast` channel。
 //! - `spawn_ws_loop()` 在后台任务中读取 WebSocket 消息，过滤后广播 `LcuEvent`。
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async_with_config, tungstenite::protocol::WebSocketConfig};
 use tracing::{debug, error, info, trace, warn};
@@ -23,7 +23,7 @@ pub struct LcuEvent {
 }
 
 pub struct WsHandle {
-    tx: broadcast::Sender<LcuEvent>,
+    pub tx: broadcast::Sender<LcuEvent>,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -37,8 +37,8 @@ pub async fn spawn_ws_loop(creds: &LcuCredentials) -> anyhow::Result<WsHandle> {
     let (tx, _) = broadcast::channel(1024);
     let tx_c = tx.clone();
     let url = format!("wss://127.0.0.1:{}/", creds.port);
-    let auth = format!("riot:{}", creds.token);
-    let auth_base64 = base64::encode(auth);
+    let auth = format!("riot:{}", creds.auth_token);
+    let auth_base64 = B64.encode(auth.as_bytes());
 
     let mut request = reqwest::Request::new(reqwest::Method::GET, url.parse()?);
     request

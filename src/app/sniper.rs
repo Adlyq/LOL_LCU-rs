@@ -1,7 +1,7 @@
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 use crate::app::event::AppEvent;
 use crate::lcu::api::LcuClient;

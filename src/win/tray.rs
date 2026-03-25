@@ -1,16 +1,13 @@
 //! 系统托盘与菜单管理
 
-use tracing::{debug, info};
+use tracing::info;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::app::config::SharedConfig;
 use crate::app::event::{AppEvent, TrayAction};
-use crate::win::base::rgb;
 use crate::win::winapi::to_wide;
 
 pub const WM_TRAY_ICON: u32 = WM_USER + 100;

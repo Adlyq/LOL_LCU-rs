@@ -4,6 +4,7 @@ use tracing::trace;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::win::base::rgb;
 use crate::win::overlay::WndState;
@@ -188,9 +189,9 @@ unsafe fn draw_optimized_stroked_text(hdc: HDC, text: &str, x: i32, y: i32, colo
     let pen = CreatePen(PS_SOLID, 3, rgb(10, 10, 10)); // 3像素宽的黑色描边
     let old_pen = SelectObject(hdc, pen);
 
-    BeginPath(hdc);
+    let _ = BeginPath(hdc);
     let _ = TextOutW(hdc, x, y, slice);
-    EndPath(hdc);
+    let _ = EndPath(hdc);
 
     // 将路径转化为描边轮廓并填充
     let _ = StrokePath(hdc);

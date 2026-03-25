@@ -13,8 +13,6 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use crate::app::config::new_shared_config;
-use crate::app::state::new_shared_state;
 use crate::lcu::api::LcuClient;
 use crate::lcu::connection::{build_client, wait_for_credentials};
 use crate::lcu::websocket::spawn_ws_loop;
@@ -141,7 +139,7 @@ async fn connection_monitor_loop(event_tx: mpsc::Sender<crate::app::event::AppEv
         info!(
             "发现 LCU 进程: Port={}, Token=***{}",
             creds.port,
-            &creds.token[creds.token.len() - 4..]
+            &creds.auth_token[creds.auth_token.len() - 4..]
         );
 
         let http_client = match build_client(&creds) {
@@ -190,7 +188,14 @@ async fn connection_monitor_loop(event_tx: mpsc::Sender<crate::app::event::AppEv
         if let Ok(phase) = api.get_gameflow_phase().await {
             info!("同步初始游戏阶段: {}", phase);
             let _ = event_tx
-                .send(crate::app::event::AppEvent::LcuPhaseChanged(phase))
+                .send(crate::app::event::AppEvent::LcuEvent(
+                    crate::lcu::websocket::LcuEvent {
+                        uri: "/lol-gameflow/v1/gameflow-phase".to_string(),
+                        payload: serde_json::Value::String(phase),
+                        opcode: "InitialSync".to_string(),
+                        event_type: "Update".to_string(),
+                    },
+                ))
                 .await;
         }
 

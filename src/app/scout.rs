@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use crate::app::event::AppEvent;
 use crate::app::premade::{analyze_premade, format_premade_message};

@@ -1,6 +1,5 @@
 use crate::lcu::api::LcuClient;
 use crate::lcu::websocket::LcuEvent;
-use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -12,12 +11,6 @@ pub enum AppEvent {
 
     /// 原始 LCU WebSocket 事件
     LcuEvent(LcuEvent),
-
-    /// 游戏阶段变更 (从 LcuEvent 提取)
-    LcuPhaseChanged(String),
-
-    /// 选人会话更新 (从 LcuEvent 提取)
-    LcuSessionUpdated(Value),
 
     /// 托盘菜单动作
     TrayAction(TrayAction),
@@ -41,9 +34,6 @@ pub enum AppEvent {
         is_premade: bool,
         is_enemy: bool,
     },
-
-    /// 配置变更事件
-    ConfigChanged,
 
     /// 窗口比例/位置更新
     WindowRectUpdated {

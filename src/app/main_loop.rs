@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::app::config::SharedConfig;
 use crate::app::event::{AppEvent, TrayAction};
@@ -141,12 +141,6 @@ impl MainLoop {
                 AppEvent::LcuEvent(lcu_event) => {
                     self.handle_lcu_event(lcu_event).await;
                 }
-                AppEvent::LcuPhaseChanged(phase) => {
-                    self.handle_phase_changed(phase).await;
-                }
-                AppEvent::LcuSessionUpdated(session) => {
-                    self.handle_session_updated(session).await;
-                }
                 AppEvent::TrayAction(action) => {
                     self.handle_tray_action(action).await;
                 }
@@ -191,7 +185,6 @@ impl MainLoop {
                     info!("收到退出信号，终止主循环");
                     break;
                 }
-                _ => {}
             }
         }
     }
@@ -375,7 +368,6 @@ impl MainLoop {
                 TrayAction::Exit => {
                     let _ = self.event_tx.send(AppEvent::Quit).await;
                 }
-                _ => {}
             }
         }
     }

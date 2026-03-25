@@ -1,19 +1,13 @@
 //! Overlay 窗口管理器 (协调者)
 
-pub mod base;
-pub mod hud1;
-pub mod hud2;
-pub mod tray;
-
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, trace};
+use tracing::info;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -24,9 +18,9 @@ use crate::app::viewmodel::ViewModel;
 use crate::win::base::SendHwnd;
 use crate::win::winapi::to_wide;
 
-use self::hud1::{hud_wnd_proc, paint_hud};
-use self::hud2::{bench_wnd_proc, get_bench_container_rect, paint_bench};
-use self::tray::{add_tray_icon, tray_wnd_proc};
+use crate::win::hud1::{hud_wnd_proc, paint_hud};
+use crate::win::hud2::{bench_wnd_proc, get_bench_container_rect, paint_bench};
+use crate::win::tray::{add_tray_icon, tray_wnd_proc};
 
 pub const WM_VM_UPDATED: u32 = WM_USER + 101;
 
@@ -40,7 +34,7 @@ pub struct WndState {
 
 #[derive(Clone)]
 pub struct OverlaySender {
-    pub tx: tokio::sync::mpsc::Sender<AppEvent>,
+    pub _tx: tokio::sync::mpsc::Sender<AppEvent>,
     pub hud_hwnd: SendHwnd,
 }
 
@@ -68,7 +62,7 @@ pub fn spawn_overlay_thread(
 
     let hud_hwnd = hwnd_rx.recv().expect("无法获取 Overlay HWND");
     OverlaySender {
-        tx: event_tx,
+        _tx: event_tx,
         hud_hwnd,
     }
 }
