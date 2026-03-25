@@ -45,9 +45,6 @@ pub enum AppEvent {
     /// 配置变更事件
     ConfigChanged,
 
-    /// 请求窗口比例修复
-    RequestWindowFix { zoom: f64, forced: bool },
-
     /// 窗口比例/位置更新
     WindowRectUpdated {
         x: i32,

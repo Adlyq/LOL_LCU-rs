@@ -106,10 +106,15 @@ impl MainLoop {
                     });
 
                     let api_c2 = api.clone();
-                    let event_tx_c = self.event_tx.clone();
                     let t2 = lcu_token.clone();
                     tokio::spawn(async move {
-                        crate::app::tasks::window_fix_loop(api_c2, event_tx_c, t2).await;
+                        crate::app::tasks::window_fix_loop(api_c2, t2).await;
+                    });
+
+                    let event_tx_c = self.event_tx.clone();
+                    let t3 = lcu_token.clone();
+                    tokio::spawn(async move {
+                        crate::app::tasks::window_position_monitor_loop(event_tx_c, t3).await;
                     });
                 }
                 AppEvent::LcuDisconnected => {
@@ -171,20 +176,6 @@ impl MainLoop {
                 } => {
                     self.handle_scout_result(puuid, content, is_premade, is_enemy)
                         .await;
-                }
-                AppEvent::RequestWindowFix { zoom, forced } => {
-                    if let Some(target) = winapi::find_lcu_window() {
-                        winapi::fix_lcu_window_by_zoom(target, zoom, forced);
-                        if let Some(r) = winapi::get_window_rect(target) {
-                            let _ = self.event_tx.try_send(AppEvent::WindowRectUpdated {
-                                x: r.left,
-                                y: r.top,
-                                width: r.right - r.left,
-                                height: r.bottom - r.top,
-                                zoom_scale: zoom,
-                            });
-                        }
-                    }
                 }
                 AppEvent::WindowRectUpdated {
                     x,
