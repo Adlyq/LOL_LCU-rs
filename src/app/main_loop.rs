@@ -324,6 +324,58 @@ impl MainLoop {
     }
 
     async fn handle_tray_action(&mut self, action: TrayAction) {
+        // 1. 处理无需 API 的配置切换动作
+        match action {
+            TrayAction::ToggleAutoAccept => {
+                let mut c = self.config.lock();
+                c.auto_accept_enabled = !c.auto_accept_enabled;
+                info!("配置更新: 自动接受对局 -> {}", c.auto_accept_enabled);
+                c.save();
+                // 如果关闭了，立即清除正在运行的接受倒计时
+                if !c.auto_accept_enabled {
+                    self.accept_timer = None;
+                }
+                return;
+            }
+            TrayAction::ToggleAutoHonor => {
+                let mut c = self.config.lock();
+                c.auto_honor_skip = !c.auto_honor_skip;
+                info!("配置更新: 自动跳过点赞 -> {}", c.auto_honor_skip);
+                c.save();
+                return;
+            }
+            TrayAction::TogglePremadeChamp => {
+                let mut c = self.config.lock();
+                c.premade_champ_select = !c.premade_champ_select;
+                info!("配置更新: 选人组黑分析 -> {}", c.premade_champ_select);
+                c.save();
+                // 如果关闭了，立即停止正在进行的分析任务并清空 UI
+                if !c.premade_champ_select {
+                    if let Some(token) = self.scout_token.take() {
+                        token.cancel();
+                    }
+                    self.reset_scout_results();
+                    let vm = self.vm_tx.borrow().clone();
+                    self.send_vm(vm);
+                }
+                return;
+            }
+            TrayAction::ToggleMemoryMonitor => {
+                let mut c = self.config.lock();
+                c.memory_monitor = !c.memory_monitor;
+                info!("配置更新: 内存监控重载 -> {}", c.memory_monitor);
+                c.save();
+                return;
+            }
+            TrayAction::Exit => {
+                info!("执行程序退出...");
+                let _ = self.event_tx.send(AppEvent::Quit).await;
+                return;
+            }
+            _ => {}
+        }
+
+        // 2. 处理需要 API 的即时动作
         if let Some(api) = &self.api {
             match action {
                 TrayAction::FixWindow => {
@@ -368,6 +420,7 @@ impl MainLoop {
                 TrayAction::Exit => {
                     let _ = self.event_tx.send(AppEvent::Quit).await;
                 }
+                _ => {}
             }
         }
     }
