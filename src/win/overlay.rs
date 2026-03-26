@@ -196,7 +196,6 @@ fn overlay_message_loop(
         }
 
         // 无论收到什么消息，都尝试检查 ViewModel 更新，确保响应速度
-        let mut vm_updated = false;
         if vm_rx.has_changed().unwrap_or(false) {
             let new_vm = vm_rx.borrow_and_update().clone();
             let s = unsafe { &mut *state };
@@ -242,12 +241,9 @@ fn overlay_message_loop(
 
             s.vm = new_vm;
             force_sync = true;
-            vm_updated = true;
 
             #[cfg(debug_assertions)]
-            if vm_updated {
-                 trace!("Overlay: VM 更新处理耗时: {:?}", start.elapsed());
-            }
+            trace!("Overlay: VM 更新处理耗时: {:?}", start.elapsed());
         }
 
         // 窗口对齐逻辑 (频率限制，但 force_sync 时立即执行)

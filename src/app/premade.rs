@@ -469,7 +469,34 @@ pub fn extract_teams_from_gameflow_session(
         }
     }
 
-    // 2. 检查人数并尝试从 session 根节点进一步补偿（针对 ARAM 或特殊模式）
+    // 2. 深度补偿：遍历全局 participants 列表 (LCU 某些模式下 teamOne/Two 会失效)
+    if let Some(all_participants) = game_data.get("participants").and_then(|v| v.as_array()) {
+        for p in all_participants {
+            let puuid = p
+                .get("puuid")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_owned());
+            let Some(p_id) = puuid else { continue };
+
+            // 如果该玩家既不在 t1 也不在 t2
+            if !t1.iter().any(|(p, _)| p == &p_id) && !t2.iter().any(|(p, _)| p == &p_id) {
+                let team_id = p.get("teamId").and_then(|v| v.as_i64()).unwrap_or(0);
+                let champ_id = p.get("championId").and_then(|v| v.as_i64()).unwrap_or(0);
+                let champ_name = id_name_map
+                    .get(&champ_id)
+                    .cloned()
+                    .unwrap_or_else(|| "未知召唤师".into());
+
+                if team_id == 100 {
+                    t1.push((p_id, champ_name));
+                } else if team_id == 200 {
+                    t2.push((p_id, champ_name));
+                }
+            }
+        }
+    }
+
+    // 3. 检查人数并尝试从 session 根节点进一步补偿（针对 ARAM 或特殊模式）
     if t1.is_empty() && t2.is_empty() {
         // 如果 teamOne/Two 都拿不到，可能是数据结构在 session 根部
         t1 = extract_team("myTeam");

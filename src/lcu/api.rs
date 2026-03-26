@@ -518,6 +518,12 @@ impl LcuClient {
         self.send_chat_message(&conv_id, body).await
     }
 
+    /// 获取单场游戏的详细统计数据。
+    pub async fn get_game(&self, game_id: i64) -> Result<Value, LcuApiError> {
+        self.get_json(&format!("/lol-match-history/v1/games/{game_id}"))
+            .await
+    }
+
     // ── 凭据与 Token ───────────────────────────────────────────────
 
     /// 获取 Entitlements Token (X-Riot-Entitlements-JWT)。

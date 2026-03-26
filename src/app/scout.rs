@@ -113,32 +113,63 @@ impl ScoutService {
     }
 
     async fn scout_player(api: &LcuClient, puuid: &str, name: &str) -> String {
-        if let Ok(history) = api.get_match_history(puuid, 8).await {
-            let games = history
-                .get("games")
-                .and_then(|v| {
-                    if v.is_array() {
-                        Some(v)
-                    } else {
-                        v.get("games")
-                    }
-                })
-                .and_then(|v| v.as_array());
+        // 1. 获取战绩摘要 (最近 8 场)
+        let history = match api.get_match_history(puuid, 8).await {
+            Ok(v) => v,
+            Err(_) => return format!("-- {} 评分:获取战绩失败", name),
+        };
 
-            if let Some(matches) = games {
-                if let Some(rating) = prophet::calculate_player_rating(puuid, matches) {
-                    let grade = prophet::get_grade_name(rating.score);
-                    return format!(
-                        "{} {} 评分:{:.0} KDA:{:.1} 胜率:{:.0}%",
-                        grade,
-                        name,
-                        rating.score,
-                        rating.avg_kda,
-                        rating.win_rate * 100.0
-                    );
+        let games = history
+            .get("games")
+            .and_then(|v| {
+                if v.is_array() {
+                    Some(v)
+                } else {
+                    v.get("games")
                 }
+            })
+            .and_then(|v| v.as_array());
+
+        let Some(matches) = games else {
+            return format!("-- {} 评分:无战绩数据", name);
+        };
+
+        // 2. 并发获取每场比赛的详细数据 (用于计算伤害占比等)
+        let mut detailed_matches = Vec::new();
+        let mut set = JoinSet::new();
+
+        for m in matches {
+            if let Some(game_id) = m.get("gameId").and_then(|v| v.as_i64()) {
+                let api_c = api.clone();
+                set.spawn(async move { api_c.get_game(game_id).await });
             }
         }
-        format!("-- {} 评分:获取失败", name)
+
+        while let Some(Ok(res)) = set.join_next().await {
+            if let Ok(game_val) = res {
+                detailed_matches.push(game_val);
+            }
+        }
+
+        // 3. 使用详细数据进行评分计算 (AkariScore)
+        let analysis_data = if !detailed_matches.is_empty() {
+            &detailed_matches
+        } else {
+            matches
+        };
+
+        if let Some(rating) = prophet::calculate_player_rating(puuid, analysis_data) {
+            let grade = prophet::get_grade_name(rating.score);
+            return format!(
+                "{} {} 评分:{:.1} KDA:{:.1} 胜率:{:.0}%",
+                grade,
+                name,
+                rating.score,
+                rating.avg_kda,
+                rating.win_rate * 100.0
+            );
+        }
+
+        format!("-- {} 评分:计算失败", name)
     }
 }
