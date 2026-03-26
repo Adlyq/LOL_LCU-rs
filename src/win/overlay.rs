@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{info, trace};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
@@ -195,108 +195,124 @@ fn overlay_message_loop(
             DispatchMessageW(&msg);
         }
 
-        if msg.message == WM_VM_UPDATED || msg.message == WM_PAINT || msg.message == WM_TIMER {
-            // 响应式 ViewModel 更新
-            if vm_rx.has_changed().unwrap_or(false) {
-                let new_vm = vm_rx.borrow_and_update().clone();
-                let s = unsafe { &mut *state };
+        // 无论收到什么消息，都尝试检查 ViewModel 更新，确保响应速度
+        let mut vm_updated = false;
+        if vm_rx.has_changed().unwrap_or(false) {
+            let new_vm = vm_rx.borrow_and_update().clone();
+            let s = unsafe { &mut *state };
 
-                // 可见性联动
-                if s.vm.hud1_visible != new_vm.hud1_visible {
-                    unsafe {
-                        let _ = ShowWindow(
-                            hud_hwnd,
-                            if new_vm.hud1_visible {
-                                SW_SHOWNOACTIVATE
-                            } else {
-                                SW_HIDE
-                            },
-                        );
-                    }
-                }
-                if s.vm.hud2_visible != new_vm.hud2_visible {
-                    unsafe {
-                        let _ = ShowWindow(
-                            bench_hwnd,
-                            if new_vm.hud2_visible {
-                                SW_SHOWNOACTIVATE
-                            } else {
-                                SW_HIDE
-                            },
-                        );
-                    }
-                }
+            #[cfg(debug_assertions)]
+            let start = Instant::now();
 
-                // 内容变更检查
-                if s.vm.hud1_lines != new_vm.hud1_lines || s.vm.hud1_title != new_vm.hud1_title {
-                    needs_paint_hud = true;
+            // 可见性联动
+            if s.vm.hud1_visible != new_vm.hud1_visible {
+                unsafe {
+                    let _ = ShowWindow(
+                        hud_hwnd,
+                        if new_vm.hud1_visible {
+                            SW_SHOWNOACTIVATE
+                        } else {
+                            SW_HIDE
+                        },
+                    );
                 }
-                if s.vm.hud2_selected_slot != new_vm.hud2_selected_slot {
-                    needs_paint_bench = true;
+            }
+            if s.vm.hud2_visible != new_vm.hud2_visible {
+                unsafe {
+                    let _ = ShowWindow(
+                        bench_hwnd,
+                        if new_vm.hud2_visible {
+                            SW_SHOWNOACTIVATE
+                        } else {
+                            SW_HIDE
+                        },
+                    );
                 }
-
-                s.vm = new_vm;
-                force_sync = true;
             }
 
-            // 窗口对齐逻辑
-            if Instant::now().duration_since(last_sync) >= Duration::from_millis(150) || force_sync
-            {
-                last_sync = Instant::now();
-                let s = unsafe { &mut *state };
+            // 内容变更检查
+            if s.vm.hud1_lines != new_vm.hud1_lines || s.vm.hud1_title != new_vm.hud1_title {
+                needs_paint_hud = true;
+            }
+            if s.vm.hud2_selected_slot != new_vm.hud2_selected_slot {
+                needs_paint_bench = true;
+                #[cfg(debug_assertions)]
+                tracing::info!("Overlay: 检测到 HUD2 槽位变更, 标记重绘");
+            }
 
-                if s.vm.lcu_rect.width > 0 {
-                    let nw = s.vm.lcu_rect.width;
-                    let nh = s.vm.lcu_rect.height;
+            s.vm = new_vm;
+            force_sync = true;
+            vm_updated = true;
 
-                    if nw != s.win_w || nh != s.win_h || force_sync {
-                        s.win_w = nw;
-                        s.win_h = nh;
-                        needs_paint_hud = true;
-                        needs_paint_bench = true;
+            #[cfg(debug_assertions)]
+            if vm_updated {
+                 trace!("Overlay: VM 更新处理耗时: {:?}", start.elapsed());
+            }
+        }
 
-                        let r = windows::Win32::Foundation::RECT {
-                            left: s.vm.lcu_rect.x,
-                            top: s.vm.lcu_rect.y,
-                            right: s.vm.lcu_rect.x + nw,
-                            bottom: s.vm.lcu_rect.y + nh,
-                        };
-                        if s.vm.hud2_visible {
-                            let bench_r = get_bench_container_rect(nw, nh);
-                            let bx = r.left + bench_r.x.round() as i32;
-                            let by = r.top + bench_r.y.round() as i32;
-                            let bw = bench_r.w.round() as i32;
-                            let bh = bench_r.h.round() as i32;
-                            unsafe {
-                                let _ = SetWindowPos(
-                                    bench_hwnd,
-                                    HWND_TOPMOST,
-                                    bx,
-                                    by,
-                                    bw,
-                                    bh,
-                                    SWP_NOACTIVATE,
-                                );
-                            }
+        // 窗口对齐逻辑 (频率限制，但 force_sync 时立即执行)
+        if force_sync || Instant::now().duration_since(last_sync) >= Duration::from_millis(150)
+        {
+            last_sync = Instant::now();
+            let s = unsafe { &mut *state };
+
+            if s.vm.lcu_rect.width > 0 {
+                let nw = s.vm.lcu_rect.width;
+                let nh = s.vm.lcu_rect.height;
+
+                if nw != s.win_w || nh != s.win_h || force_sync {
+                    s.win_w = nw;
+                    s.win_h = nh;
+                    needs_paint_hud = true;
+                    needs_paint_bench = true;
+
+                    let r = windows::Win32::Foundation::RECT {
+                        left: s.vm.lcu_rect.x,
+                        top: s.vm.lcu_rect.y,
+                        right: s.vm.lcu_rect.x + nw,
+                        bottom: s.vm.lcu_rect.y + nh,
+                    };
+                    if s.vm.hud2_visible {
+                        let bench_r = get_bench_container_rect(nw, nh);
+                        let bx = r.left + bench_r.x.round() as i32;
+                        let by = r.top + bench_r.y.round() as i32;
+                        let bw = bench_r.w.round() as i32;
+                        let bh = bench_r.h.round() as i32;
+                        unsafe {
+                            let _ = SetWindowPos(
+                                bench_hwnd,
+                                HWND_TOPMOST,
+                                bx,
+                                by,
+                                bw,
+                                bh,
+                                SWP_NOACTIVATE,
+                            );
                         }
                     }
                 }
-                force_sync = false;
             }
+            force_sync = false;
+        }
 
-            // 执行绘制
-            if needs_paint_hud && unsafe { (*state).vm.hud1_visible } {
-                unsafe {
-                    paint_hud(hud_hwnd, &*state);
-                }
-                needs_paint_hud = false;
+        // 执行重绘 (在此处执行可确保在一次消息处理循环内完成从“收到变更”到“呈现”的全过程)
+        if needs_paint_hud && unsafe { (*state).vm.hud1_visible } {
+            unsafe {
+                paint_hud(hud_hwnd, &*state);
             }
-            if needs_paint_bench && unsafe { (*state).vm.hud2_visible } {
-                unsafe {
-                    paint_bench(bench_hwnd, &*state);
-                }
-                needs_paint_bench = false;
+            needs_paint_hud = false;
+        }
+        if needs_paint_bench && unsafe { (*state).vm.hud2_visible } {
+            #[cfg(debug_assertions)]
+            let paint_start = Instant::now();
+
+            unsafe {
+                paint_bench(bench_hwnd, &*state);
             }
+            needs_paint_bench = false;
+
+            #[cfg(debug_assertions)]
+            tracing::info!("Overlay: HUD2 重绘完成，耗时: {:?}", paint_start.elapsed());
         }
     }
 }

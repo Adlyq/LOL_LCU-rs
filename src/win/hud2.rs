@@ -1,6 +1,5 @@
 //! HUD2: 大乱斗板凳席交互层
 
-use tracing::trace;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -14,9 +13,9 @@ const TEMPLATE_W: f64 = 1920.0;
 const TEMPLATE_H: f64 = 1080.0;
 
 const SLOT_START_X: f64 = 528.0;
-const SLOT_START_Y: f64 = 17.0;
-const SLOT_SIZE: f64 = 70.0;
-const SLOT_GAP: f64 = 16.4;
+const SLOT_START_Y: f64 = 16.0;
+const SLOT_SIZE: f64 = 74.0;
+const SLOT_GAP: f64 = 14.2;
 const SLOTS_PADDING_H: f64 = 3.0;
 const SLOTS_PADDING_V: f64 = 3.0;
 const BENCH_SLOT_COUNT: usize = 10;
@@ -98,21 +97,7 @@ pub fn get_bench_container_rect(win_w: i32, win_h: i32) -> FRect {
         h: (BENCH_B - BENCH_T) * scale_y,
     }
 }
-// const SLOT_START_X: f64 = 528.0;
-// const SLOT_START_Y: f64 = 17.0;
-// const SLOT_SIZE: f64 = 70.0;
-// const SLOT_GAP: f64 = 16.4;
-// const SLOTS_PADDING_H: f64 = 3.0;
-// const SLOTS_PADDING_V: f64 = 3.0;
-// const BENCH_SLOT_COUNT: usize = 10;
-// const BENCH_L: f64 = SLOT_START_X - SLOTS_PADDING_H;
-// const BENCH_T: f64 = SLOT_START_Y - SLOTS_PADDING_V;
-// const BENCH_W: f64 = SLOT_SIZE * BENCH_SLOT_COUNT as f64
-//     + SLOT_GAP * (BENCH_SLOT_COUNT as f64 - 1.0)
-//     + SLOTS_PADDING_H * 2.0;
-// const BENCH_H: f64 = SLOT_SIZE + SLOTS_PADDING_V * 2.0;
-// const BENCH_R: f64 = BENCH_L + BENCH_W;
-// const BENCH_B: f64 = BENCH_T + BENCH_H;
+
 pub fn get_slot_rect(index: usize, container: FRect, win_w: i32, win_h: i32) -> FRect {
     let scale_x = win_w as f64 / TEMPLATE_W;
     let scale_y = win_h as f64 / TEMPLATE_H;
@@ -167,7 +152,6 @@ fn hit_slot(px: f64, py: f64, state: &WndState) -> Option<usize> {
 }
 
 pub unsafe fn paint_bench(hwnd: HWND, state: &WndState) {
-    trace!("渲染 HUD2 (板凳席交互层)");
     let mut rect = RECT::default();
     let _ = GetWindowRect(hwnd, &mut rect);
     let hud_w = rect.right - rect.left;
