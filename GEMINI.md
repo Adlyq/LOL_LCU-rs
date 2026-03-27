@@ -69,12 +69,14 @@
 
 - [Kebs LCU Explorer](https://lcu.kebs.dev/?i=1): 实时 API 字段参考。
 - [LCU Schema Tool](https://www.mingweisamuel.com/lcu-schema/tool/#/): 完整的 Swagger 定义与数据结构。
+- [Riot Games 官方 API 文档](https://developer.riotgames.com/apis)英雄联盟开发者平台：官方 LCU API 文档（较为简略）。
 
 ### 优秀类似项目
 
 - [LeagueAkari](https://github.com/LeagueAkari/LeagueAkari): 功能最全面的 LCU 工具。
 - [fix-lcu-window](https://github.com/LeagueTavern/fix-lcu-window): 专业的 LCU 窗口修复工具实现。
 - [Willump](https://github.com/elliejs/Willump/issues): 经典的 Python LCU 封装库。
+- [Ezhana-lcu](https://github.com/Ezhana/lcu): 一个封装完好的LCU API及SGP支持的Go Mod。
 
 ### 技术指南
 
